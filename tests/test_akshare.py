@@ -1,3 +1,9 @@
+import pytest
+
+pytest.skip(
+    "Manual integration test requiring external market data", allow_module_level=True
+)
+
 import akshare as ak
 
 print(f"akshare version: {ak.__version__}")

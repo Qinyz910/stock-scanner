@@ -15,6 +15,29 @@
 7. 支持GitHub Actions 一键部署  
 8. 支持Nginx反向代理，可通过80/443端口访问
 
+## 开发命令
+
+### 后端
+
+```bash
+pip install -r requirements.txt
+pip install -r requirements-dev.txt
+make lint
+make typecheck
+make test
+```
+
+### 前端
+
+```bash
+cd frontend
+npm install
+npm run lint
+npm run typecheck
+npm run test
+npm run build
+```
+
 ## Docker镜像一键部署
 
 ```

@@ -1,3 +1,9 @@
+import pytest
+
+pytest.skip(
+    "Manual integration test requiring external API access", allow_module_level=True
+)
+
 import os
 import requests
 import json
