@@ -2,6 +2,7 @@
   <div class="stock-search-container">
     <n-input
       v-model:value="searchKeyword"
+      :disabled="props.disabled"
       placeholder="输入代码或名称搜索"
       @input="handleSearchInput"
       @blur="handleBlur"
@@ -49,7 +50,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, onBeforeUnmount } from 'vue';
+import { ref, onMounted, onBeforeUnmount, watch } from 'vue';
 import { NInput, NIcon, NSpin, NScrollbar } from 'naive-ui';
 import { Search as SearchIcon } from '@vicons/ionicons5';
 import { apiService } from '@/services/api';
@@ -58,6 +59,7 @@ import type { SearchResult } from '@/types';
 
 const props = defineProps<{
   marketType: string;
+  disabled?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -72,6 +74,12 @@ const searchInputRef = ref<any>(null);
 
 // 创建防抖搜索函数
 const debouncedSearch = debounce(async (keyword: string) => {
+  if (props.disabled) {
+    results.value = [];
+    loading.value = false;
+    return;
+  }
+
   if (!keyword) {
     results.value = [];
     loading.value = false;
@@ -101,6 +109,9 @@ const debouncedSearch = debounce(async (keyword: string) => {
 }, 300);
 
 function handleSearchInput() {
+  if (props.disabled) {
+    return;
+  }
   showResults.value = true;
   debouncedSearch(searchKeyword.value);
 }
@@ -122,6 +133,9 @@ function handleBlur() {
 }
 
 function handleFocus() {
+  if (props.disabled) {
+    return;
+  }
   if (searchKeyword.value) {
     showResults.value = true;
   }
@@ -140,6 +154,14 @@ function handleClickOutside(event: MouseEvent) {
     showResults.value = false;
   }
 }
+
+watch(() => props.disabled, (disabled) => {
+  if (disabled) {
+    showResults.value = false;
+    loading.value = false;
+    results.value = [];
+  }
+});
 
 onMounted(() => {
   document.addEventListener('click', handleClickOutside);

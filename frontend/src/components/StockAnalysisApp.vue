@@ -31,19 +31,21 @@
               <div class="config-section">
                 <n-form-item label="选择市场类型">
                   <n-select
-                    v-model:value="marketType"
-                    :options="marketOptions"
-                    @update:value="handleMarketTypeChange"
-                  />
+                     v-model:value="marketType"
+                     :disabled="isAnalyzing"
+                     :options="marketOptions"
+                     @update:value="handleMarketTypeChange"
+                   />
                 </n-form-item>
-                
+
                 <n-form-item :label='marketType === "US" ? "股票搜索" : "基金搜索"' v-if="showSearch">
-                  <StockSearch :market-type="marketType" @select="addSelectedStock" />
+                  <StockSearch :market-type="marketType" :disabled="isAnalyzing" @select="addSelectedStock" />
                 </n-form-item>
                 
                 <n-form-item label="输入代码">
                   <n-input
                     v-model:value="stockCodes"
+                    :disabled="isAnalyzing"
                     type="textarea"
                     placeholder="输入股票、基金代码，多个代码用逗号、空格或换行分隔"
                     :autosize="{ minRows: 3, maxRows: 6 }"
@@ -54,14 +56,23 @@
                   <n-button
                     type="primary"
                     :loading="isAnalyzing"
-                    :disabled="!stockCodes.trim()"
+                    :disabled="isAnalyzing || !stockCodes.trim()"
                     @click="analyzeStocks"
                   >
                     {{ isAnalyzing ? '分析中...' : '开始分析' }}
                   </n-button>
                   
                   <n-button
-                    :disabled="analyzedStocks.length === 0"
+                    type="error"
+                    secondary
+                    :disabled="!isAnalyzing"
+                    @click="cancelAnalysis"
+                  >
+                    取消
+                  </n-button>
+                  
+                  <n-button
+                    :disabled="analyzedStocks.length === 0 || isAnalyzing"
                     @click="copyAnalysisResults"
                   >
                     复制结果
@@ -88,18 +99,18 @@
                       />
                       <n-button 
                         size="small" 
-                        :disabled="analyzedStocks.length === 0"
+                        :disabled="analyzedStocks.length === 0 || isAnalyzing"
                         @click="copyAnalysisResults"
                       >
                         复制结果
                       </n-button>
                       <n-dropdown 
                         trigger="click" 
-                        :disabled="analyzedStocks.length === 0"
+                        :disabled="analyzedStocks.length === 0 || isAnalyzing"
                         :options="exportOptions"
                         @select="handleExportSelect"
                       >
-                        <n-button size="small" :disabled="analyzedStocks.length === 0">
+                        <n-button size="small" :disabled="analyzedStocks.length === 0 || isAnalyzing">
                           导出
                           <template #icon>
                             <n-icon>
@@ -111,8 +122,25 @@
                     </n-space>
                   </n-space>
                 </div>
+
+                <StreamStatusBar
+                  v-if="isAnalyzing || streamMetrics.statusText"
+                  :is-streaming="isAnalyzing"
+                  :processed="processedStocksCount"
+                  :total="totalStocksCount"
+                  :chunk-count="streamMetrics.chunkCount"
+                  :retries="streamMetrics.retries"
+                  :status-text="streamMetrics.statusText"
+                  :can-cancel="isAnalyzing"
+                  @cancel="cancelAnalysis"
+                />
                 
-                <template v-if="analyzedStocks.length === 0 && !isAnalyzing">
+                <template v-if="isAnalyzing && analyzedStocks.length === 0">
+                  <div class="analysis-skeleton">
+                    <n-skeleton height="120px" :repeat="Math.min(totalStocksCount || 3, 5)" animated />
+                  </div>
+                </template>
+                <template v-else-if="analyzedStocks.length === 0">
                   <n-empty description="尚未分析股票" size="large">
                     <template #icon>
                       <n-icon :component="DocumentTextIcon" />
@@ -153,7 +181,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, computed, onBeforeUnmount } from 'vue';
+import { ref, reactive, computed, onMounted, onBeforeUnmount } from 'vue';
 import { 
   NLayout, 
   NLayoutContent, 
@@ -166,6 +194,7 @@ import {
   NInput, 
   NButton,
   NEmpty,
+  NSkeleton,
   useMessage,
   NSpace,
   NText,
@@ -183,9 +212,11 @@ import MarketTimeDisplay from './MarketTimeDisplay.vue';
 import ApiConfigPanel from './ApiConfigPanel.vue';
 import StockSearch from './StockSearch.vue';
 import StockCard from './StockCard.vue';
+import StreamStatusBar from './StreamStatusBar.vue';
 import AnnouncementBanner from './AnnouncementBanner.vue';
 
 import { apiService } from '@/services/api';
+import { streamRequest, isStreamRequestError, type StreamChunk, type StreamRequestResult } from '@/services/streamRequest';
 import type { StockInfo, ApiConfig, StreamInitMessage, StreamAnalysisUpdate } from '@/types';
 import { loadApiConfig } from '@/utils';
 import { validateMultipleStockCodes, MarketType } from '@/utils/stockValidator';
@@ -207,6 +238,20 @@ const stockCodes = ref('');
 const isAnalyzing = ref(false);
 const analyzedStocks = ref<StockInfo[]>([]);
 const displayMode = ref<'card' | 'table'>('card');
+const abortControllerRef = ref<AbortController | null>(null);
+const activeStream = ref<StreamRequestResult | null>(null);
+const totalStocksCount = ref(0);
+const streamMetrics = reactive({
+  chunkCount: 0,
+  retries: 0,
+  statusText: '',
+  startedAt: 0,
+  finishedAt: 0,
+  completed: false,
+});
+const processedStocksCount = computed(() =>
+  analyzedStocks.value.filter((stock) => stock.analysisStatus === 'completed' || stock.analysisStatus === 'error').length
+);
 
 // API配置
 const apiConfig = ref<ApiConfig>({
@@ -426,64 +471,144 @@ function addSelectedStock(symbol: string) {
   }
 }
 
-// 处理流式响应的数据
-function processStreamData(text: string) {
+const pendingStockUpdates: StreamAnalysisUpdate[] = [];
+let pendingUpdatesFlushHandle: number | null = null;
+let pendingFlushScheduler: 'animation' | 'timeout' | null = null;
+
+function safeParseChunk(chunk: StreamChunk): unknown {
+  if (chunk.json !== undefined) {
+    return chunk.json;
+  }
+  if (!chunk.raw) {
+    return undefined;
+  }
   try {
-    // 尝试解析为JSON
-    const data = JSON.parse(text);
-    
-    // 判断是初始消息还是更新消息
-    if (data.stream_type === 'single' || data.stream_type === 'batch') {
-      // 初始消息
-      handleStreamInit(data as StreamInitMessage);
-    } else if (data.stock_code) {
-      // 更新消息
-      handleStreamUpdate(data as StreamAnalysisUpdate);
-    } else if (data.scan_completed) {
-      // 扫描完成消息
-      message.success(`分析完成，共扫描 ${data.total_scanned} 只股票，符合条件 ${data.total_matched} 只`);
-      
-      // 将所有分析中的股票状态更新为已完成
-      analyzedStocks.value = analyzedStocks.value.map(stock => {
-        if (stock.analysisStatus === 'analyzing') {
-          return { 
-            ...stock, 
-            analysisStatus: 'completed' as const 
-          };
-        }
-        return stock;
-      });
-      
-      isAnalyzing.value = false;
+    return JSON.parse(chunk.raw);
+  } catch (error) {
+    console.debug('解析流数据出错:', error);
+    return undefined;
+  }
+}
+
+function flushPendingStockUpdates() {
+  if (!pendingStockUpdates.length) {
+    return;
+  }
+  const updates = pendingStockUpdates.splice(0, pendingStockUpdates.length);
+  updates.forEach((update) => {
+    applyStreamUpdate(update);
+  });
+}
+
+function schedulePendingUpdatesFlush() {
+  if (pendingUpdatesFlushHandle !== null) {
+    return;
+  }
+
+  if (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function') {
+    pendingFlushScheduler = 'animation';
+    pendingUpdatesFlushHandle = window.requestAnimationFrame(() => {
+      pendingUpdatesFlushHandle = null;
+      pendingFlushScheduler = null;
+      flushPendingStockUpdates();
+    });
+  } else {
+    pendingFlushScheduler = 'timeout';
+    pendingUpdatesFlushHandle = window.setTimeout(() => {
+      pendingUpdatesFlushHandle = null;
+      pendingFlushScheduler = null;
+      flushPendingStockUpdates();
+    }, 16);
+  }
+}
+
+function cancelPendingUpdatesFlush() {
+  if (pendingUpdatesFlushHandle === null) {
+    return;
+  }
+
+  if (pendingFlushScheduler === 'animation' && typeof window !== 'undefined' && typeof window.cancelAnimationFrame === 'function') {
+    window.cancelAnimationFrame(pendingUpdatesFlushHandle);
+  } else {
+    clearTimeout(pendingUpdatesFlushHandle);
+  }
+  pendingUpdatesFlushHandle = null;
+  pendingFlushScheduler = null;
+}
+
+function queueStockUpdate(update: StreamAnalysisUpdate) {
+  pendingStockUpdates.push(update);
+  schedulePendingUpdatesFlush();
+}
+
+function handleStreamChunk(chunk: StreamChunk) {
+  const payload = safeParseChunk(chunk);
+  if (!payload || typeof payload !== 'object') {
+    return;
+  }
+
+  const data = payload as Record<string, any>;
+
+  if (data.stream_type === 'single' || data.stream_type === 'batch') {
+    handleStreamInit(data as StreamInitMessage);
+    return;
+  }
+
+  if (data.stock_code) {
+    streamMetrics.statusText = '正在接收分析结果...';
+    queueStockUpdate(data as StreamAnalysisUpdate);
+    return;
+  }
+
+  if (data.scan_completed) {
+    const totalScanned = typeof data.total_scanned === 'number' ? data.total_scanned : undefined;
+    const totalMatched = typeof data.total_matched === 'number' ? data.total_matched : undefined;
+    streamMetrics.statusText = '分析完成';
+    streamMetrics.completed = true;
+    if (typeof totalScanned === 'number' && typeof totalMatched === 'number') {
+      message.success(`分析完成，共扫描 ${totalScanned} 只股票，符合条件 ${totalMatched} 只`);
+    } else {
+      message.success('分析完成');
     }
-  } catch (e) {
-    console.error('解析流数据出错:', e);
+    analyzedStocks.value = analyzedStocks.value.map((stock) => {
+      if (stock.analysisStatus === 'analyzing') {
+        return {
+          ...stock,
+          analysisStatus: 'completed' as const,
+        };
+      }
+      return stock;
+    });
+    cancelPendingUpdatesFlush();
+    flushPendingStockUpdates();
   }
 }
 
 // 处理流式初始化消息
 function handleStreamInit(data: StreamInitMessage) {
+  streamMetrics.statusText = '准备分析...';
+
   if (data.stream_type === 'single' && data.stock_code) {
-    // 单个股票分析
     analyzedStocks.value = [{
       code: data.stock_code,
       name: '',
       marketType: marketType.value,
       analysisStatus: 'waiting'
     }];
+    totalStocksCount.value = 1;
   } else if (data.stream_type === 'batch' && data.stock_codes) {
-    // 批量分析
     analyzedStocks.value = data.stock_codes.map(code => ({
       code,
       name: '',
       marketType: marketType.value,
       analysisStatus: 'waiting'
     }));
+    totalStocksCount.value = data.stock_codes.length;
   }
 }
 
 // 处理流式更新消息
-function handleStreamUpdate(data: StreamAnalysisUpdate) {
+function applyStreamUpdate(data: StreamAnalysisUpdate) {
   const stockIndex = analyzedStocks.value.findIndex((s: StockInfo) => s.code === data.stock_code);
   
   if (stockIndex >= 0) {
@@ -556,9 +681,8 @@ async function analyzeStocks() {
     return;
   }
   
-  // 解析股票代码
   const codes = stockCodes.value
-    .split(/[,\s\n]+/)
+    .split(/[\s\n,]+/)
     .map((code: string) => code.trim())
     .filter((code: string) => code);
   
@@ -567,39 +691,56 @@ async function analyzeStocks() {
     return;
   }
   
-  // 去除重复的股票代码
   const uniqueCodes = Array.from(new Set(codes));
   
-  // 检查是否有重复代码被移除
   if (uniqueCodes.length < codes.length) {
     message.info(`已自动去除${codes.length - uniqueCodes.length}个重复的股票代码`);
   }
   
-  // 在前端验证股票代码
   const marketTypeEnum = marketType.value as keyof typeof MarketType;
   const invalidCodes = validateMultipleStockCodes(
     uniqueCodes, 
     MarketType[marketTypeEnum]
   );
   
-  // 如果有无效代码，显示错误信息并返回
   if (invalidCodes.length > 0) {
     const errorMessages = invalidCodes.map(item => item.errorMessage).join('\n');
     message.error(`股票代码验证失败:${errorMessages}`);
     return;
   }
   
+  if (isAnalyzing.value) {
+    message.warning('分析正在进行中，请稍候');
+    return;
+  }
+  
   isAnalyzing.value = true;
   analyzedStocks.value = [];
+  totalStocksCount.value = uniqueCodes.length;
+  pendingStockUpdates.length = 0;
+  cancelPendingUpdatesFlush();
+  
+  streamMetrics.chunkCount = 0;
+  streamMetrics.retries = 0;
+  streamMetrics.statusText = '等待服务器响应...';
+  streamMetrics.startedAt = performance.now();
+  streamMetrics.finishedAt = 0;
+  streamMetrics.completed = false;
+  
+  const telemetryContext = {
+    stockCount: uniqueCodes.length,
+    market: marketType.value,
+  };
+  
+  const controller = new AbortController();
+  abortControllerRef.value = controller;
   
   try {
-    // 构建请求参数
-    const requestData = {
+    const requestData: Record<string, unknown> = {
       stock_codes: uniqueCodes,
       market_type: marketType.value
-    } as any;
+    };
     
-    // 添加自定义API配置
     if (apiConfig.value.apiUrl) {
       requestData.api_url = apiConfig.value.apiUrl;
     }
@@ -616,100 +757,212 @@ async function analyzeStocks() {
       requestData.api_timeout = apiConfig.value.apiTimeout;
     }
     
-    // 获取身份验证令牌
     const token = localStorage.getItem('token');
     
-    // 构建请求头
     const headers: Record<string, string> = {
       'Content-Type': 'application/json'
     };
     
-    // 如果有令牌，添加到请求头
     if (token) {
       headers['Authorization'] = `Bearer ${token}`;
     }
     
-    // 发送分析请求
-    const response = await fetch('/api/analyze', {
+    const configuredTimeout = Number(apiConfig.value.apiTimeout || defaultApiTimeout.value || '120');
+    const totalTimeoutMs = Number.isFinite(configuredTimeout)
+      ? Math.max(configuredTimeout * 1000, 60_000)
+      : 120_000;
+    
+    console.info('[analysis] 流式分析开始', telemetryContext);
+    
+    const stream = await streamRequest('/api/analyze', {
       method: 'POST',
       headers,
-      body: JSON.stringify(requestData)
+      body: JSON.stringify(requestData),
+      signal: controller.signal,
+      timeoutMs: {
+        ttfb: 30_000,
+        total: totalTimeoutMs,
+      },
+      retryPolicy: {
+        maxRetries: 2,
+        retryStatusCodes: [500, 502, 503, 504],
+        retryOnNetworkError: true,
+        baseDelayMs: 800,
+        backoffMultiplier: 2,
+        maxDelayMs: 4_000,
+        jitterRatio: 0.2,
+      },
     });
     
-    if (!response.ok) {
-      if (response.status === 401) {
-        message.error('未授权访问，请登录后再试');
-        // 可以在这里触发登录流程
-        return;
-      }
-      if (response.status === 404) {
-        throw new Error('服务器接口未找到，请检查服务是否正常运行');
-      }
-      throw new Error(`服务器响应错误: ${response.status}`);
+    activeStream.value = stream;
+    streamMetrics.retries = Math.max(0, stream.attempts - 1);
+    
+    for await (const chunk of stream) {
+      streamMetrics.chunkCount += 1;
+      handleStreamChunk(chunk);
     }
     
-    // 处理流式响应
-    const reader = response.body?.getReader();
-    if (!reader) {
-      throw new Error('无法读取响应流');
+    cancelPendingUpdatesFlush();
+    flushPendingStockUpdates();
+    
+    if (!streamMetrics.completed) {
+      streamMetrics.completed = true;
+      streamMetrics.statusText = '分析完成';
+      message.success('分析完成');
     }
     
-    const decoder = new TextDecoder();
-    let buffer = '';
-    
-    while (true) {
-      const { done, value } = await reader.read();
-      
-      if (done) {
-        break;
-      }
-      
-      // 解码并处理数据
-      const text = decoder.decode(value, { stream: true });
-      buffer += text;
-      
-      // 按行处理数据
-      const lines = buffer.split('\n');
-      buffer = lines.pop() || ''; // 最后一行可能不完整，保留到下一次
-      
-      for (const line of lines) {
-        if (line.trim()) {
-          try {
-            processStreamData(line);
-          } catch (e: Error | unknown) {
-            console.error('处理数据流时出错:', e);
-            message.error(`处理数据时出错: ${e instanceof Error ? e.message : '未知错误'}`);
-          }
-        }
-      }
-    }
-    
-    // 处理最后可能剩余的数据
-    if (buffer.trim()) {
-      try {
-        processStreamData(buffer);
-      } catch (e: Error | unknown) {
-        console.error('处理最后的数据块时出错:', e);
-        message.error(`处理数据时出错: ${e instanceof Error ? e.message : '未知错误'}`);
-      }
-    }
-    
-    message.success('分析完成');
-  } catch (error: any) {
-    let errorMessage = '分析出错: ';
-    if (error.message.includes('404')) {
-      errorMessage += '服务器接口未找到，请确保后端服务正常运行';
-    } else {
-      errorMessage += error.message || '未知错误';
-    }
-    message.error(errorMessage);
-    console.error('分析股票时出错:', error);
-    
-    // 清空分析状态
-    analyzedStocks.value = [];
+    const durationMs = performance.now() - streamMetrics.startedAt;
+    console.info('[analysis] 流式分析完成', {
+      ...telemetryContext,
+      durationMs: Math.round(durationMs),
+      chunkCount: streamMetrics.chunkCount,
+      retries: streamMetrics.retries,
+    });
+  } catch (error) {
+    cancelPendingUpdatesFlush();
+    flushPendingStockUpdates();
+    handleStreamFailure(error, telemetryContext);
   } finally {
+    streamMetrics.finishedAt = performance.now();
+    if (abortControllerRef.value === controller) {
+      abortControllerRef.value = null;
+    }
+    activeStream.value = null;
     isAnalyzing.value = false;
   }
+}
+
+function cancelAnalysis() {
+  if (!isAnalyzing.value && !abortControllerRef.value) {
+    return;
+  }
+
+  console.info('[analysis] 取消分析请求');
+  if (isAnalyzing.value) {
+    streamMetrics.statusText = '取消中...';
+  }
+  if (activeStream.value) {
+    activeStream.value.cancel('user');
+  }
+  if (abortControllerRef.value) {
+    abortControllerRef.value.abort('user');
+  }
+}
+
+function handleStreamFailure(error: unknown, telemetryContext: { stockCount: number; market: string }) {
+  const durationMs = performance.now() - streamMetrics.startedAt;
+  streamMetrics.completed = false;
+
+  if (isStreamRequestError(error)) {
+    if (error.code === 'ABORTED') {
+      streamMetrics.statusText = '已取消';
+      const reason = error.details?.reason;
+      console.info('[analysis] 流式分析取消', {
+        ...telemetryContext,
+        durationMs: Math.round(durationMs),
+        reason,
+      });
+      if (reason === 'user') {
+        message.info('已取消分析');
+      } else if (reason !== 'component') {
+        message.warning('请求已取消');
+      }
+      analyzedStocks.value = [];
+      totalStocksCount.value = 0;
+      streamMetrics.chunkCount = 0;
+      streamMetrics.retries = 0;
+      return;
+    }
+
+    if (error.code === 'TIMEOUT') {
+      const phase = error.details?.phase;
+      const timeoutMessage = phase === 'ttfb'
+        ? '连接服务器超时，请稍后重试'
+        : '分析超时，请尝试减少股票数量或稍后再试';
+      streamMetrics.statusText = phase === 'ttfb' ? '等待响应超时' : '分析超时';
+      console.error('[analysis] 流式分析超时', {
+        ...telemetryContext,
+        durationMs: Math.round(durationMs),
+        phase,
+      });
+      message.error(timeoutMessage);
+      markIncompleteStocksAsError(timeoutMessage);
+      return;
+    }
+
+    if (error.code === 'HTTP_ERROR') {
+      const status = error.details?.status;
+      let httpMessage = '请求失败，请稍后再试';
+      if (status === 401) {
+        httpMessage = '未授权访问，请登录后再试';
+      } else if (status === 404) {
+        httpMessage = '服务器接口未找到，请检查后端服务';
+      } else if (status) {
+        httpMessage = `请求失败 (HTTP ${status})`;
+      }
+      streamMetrics.statusText = '请求失败';
+      console.error('[analysis] 流式分析请求失败', {
+        ...telemetryContext,
+        durationMs: Math.round(durationMs),
+        status,
+      });
+      message.error(httpMessage);
+      markIncompleteStocksAsError(httpMessage);
+      return;
+    }
+
+    if (error.code === 'NETWORK') {
+      const networkMessage = '网络异常，请检查连接后重试';
+      streamMetrics.statusText = '网络异常';
+      console.error('[analysis] 流式分析网络异常', {
+        ...telemetryContext,
+        durationMs: Math.round(durationMs),
+        error,
+      });
+      message.error(networkMessage);
+      markIncompleteStocksAsError(networkMessage);
+      return;
+    }
+
+    const fallbackMessage = error.message || '分析失败，请稍后重试';
+    streamMetrics.statusText = '请求失败';
+    console.error('[analysis] 流式分析异常', {
+      ...telemetryContext,
+      durationMs: Math.round(durationMs),
+      error,
+    });
+    message.error(fallbackMessage);
+    markIncompleteStocksAsError(fallbackMessage);
+    return;
+  }
+
+  const genericMessage = error instanceof Error && error.message
+    ? `分析失败: ${error.message}`
+    : '分析失败，请稍后重试';
+  streamMetrics.statusText = '请求失败';
+  console.error('[analysis] 流式分析异常', {
+    ...telemetryContext,
+    durationMs: Math.round(durationMs),
+    error,
+  });
+  message.error(genericMessage);
+  markIncompleteStocksAsError(genericMessage);
+}
+
+function markIncompleteStocksAsError(messageText: string) {
+  if (analyzedStocks.value.length === 0) {
+    return;
+  }
+  analyzedStocks.value = analyzedStocks.value.map((stock) => {
+    if (stock.analysisStatus === 'completed') {
+      return stock;
+    }
+    return {
+      ...stock,
+      analysisStatus: 'error',
+      error: messageText,
+    };
+  });
 }
 
 // 复制分析结果
@@ -967,6 +1220,14 @@ onMounted(async () => {
 // 组件销毁前移除事件监听
 onBeforeUnmount(() => {
   window.removeEventListener('resize', handleResize);
+  if (abortControllerRef.value) {
+    abortControllerRef.value.abort('component');
+  }
+  if (activeStream.value) {
+    activeStream.value.cancel('component');
+  }
+  cancelPendingUpdatesFlush();
+  pendingStockUpdates.length = 0;
 });
 
 // 处理公告关闭事件
@@ -1028,6 +1289,14 @@ function handleAnnouncementClose() {
 .results-section {
   padding: 0.5rem;
   min-height: 200px;
+}
+
+.analysis-skeleton {
+  padding: 16px 0;
+}
+
+.analysis-skeleton :deep(.n-skeleton) {
+  margin-bottom: 12px;
 }
 
 .results-header {
