@@ -23,7 +23,7 @@
 
 ```shell
 # 拉取最新版本
-docker pull cassianvale/stock-scanner:latest
+docker pull qinyz/stock_scanner:latest
 
 # 确保本地目录存在（用于持久化日志和数据）
 mkdir -p logs data
@@ -41,15 +41,15 @@ docker run -d \
   -e LOGIN_PASSWORD="你的登录密码" \
   -e ANNOUNCEMENT_TEXT="你的公告内容" \
   --restart unless-stopped \
-  cassianvale/stock-scanner:latest
+  qinyz/stock_scanner:latest
 ```
 
 - 方式B：使用 docker-compose（推荐，自动拉取镜像）
 
 ```shell
 # 克隆仓库以获取 compose 文件和 Nginx 配置
-git clone https://github.com/cassianvale/stock-scanner.git
-cd stock-scanner
+git clone https://github.com/qinyz/stock_scanner.git
+cd stock_scanner
 
 # 创建.env并设置必要变量（参考下文说明）
 cp .env.example .env
@@ -79,7 +79,7 @@ docker run -d \
   -e LOGIN_PASSWORD="你的登录密码" \
   -e ANNOUNCEMENT_TEXT="你的公告内容" \
   --restart unless-stopped \
-  cassianvale/stock-scanner:latest
+  qinyz/stock_scanner:latest
 
 # 准备 Nginx 配置和目录（使用仓库中的 nginx/nginx.conf）
 mkdir -p nginx/logs nginx/ssl
@@ -117,8 +117,8 @@ API_URL 处理逻辑（与 Cherry Studio 保持一致）：
 
 ```shell
 # 克隆仓库
-git clone https://github.com/cassianvale/stock-scanner.git
-cd stock-scanner
+git clone https://github.com/qinyz/stock_scanner.git
+cd stock_scanner
 
 # 创建.env文件并填写必要的环境变量
 cat > .env << EOL
@@ -141,8 +141,8 @@ openssl req -x509 -nodes -days 365 \
   -subj "/CN=localhost" \
   -addext "subjectAltName=DNS:localhost,IP:127.0.0.1"
 
-# 启动服务
-docker-compose up -d
+# 启动服务（包含 Nginx）
+docker-compose -f docker-compose.simple.yml up -d
 ```
 
 ### 使用自己的SSL证书
@@ -151,7 +151,7 @@ docker-compose up -d
 
 1. 将您的证书文件放在 `nginx/ssl/` 目录下
 2. 确保证书文件命名为 `fullchain.pem`，私钥文件命名为 `privkey.pem`
-3. 重启服务: `docker-compose restart nginx`
+3. 重启服务: `docker-compose -f docker-compose.simple.yml restart nginx`
 
 相关参考：[免费泛域名 SSL 证书申请及自动续期（使用 1Panel 面板）](https://bronya-zaychik.cn/archives/GenSSL.html)
 
