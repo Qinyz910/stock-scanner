@@ -4,9 +4,16 @@ import os
 from datetime import datetime
 
 
-# 创建日志目录
-log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
-os.makedirs(log_dir, exist_ok=True)
+# 日志目录优先使用环境变量或容器挂载目录 /app/logs，不可用时回退到项目相对目录 utils/logs
+try:
+    env_log_dir = os.getenv("LOG_DIR")
+    preferred_log_dir = env_log_dir or "/app/logs"
+    os.makedirs(preferred_log_dir, exist_ok=True)
+    log_dir = preferred_log_dir
+except Exception:
+    # 回退到相对目录，确保本地开发可用
+    log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+    os.makedirs(log_dir, exist_ok=True)
 
 # 配置日志
 logger.remove()  # 移除默认的处理器
