@@ -17,9 +17,53 @@
 
 ## Docker镜像一键部署
 
-```
+选一种方式即可：
+
+- 方式A：快速启动（单容器，无 Nginx）
+
+```shell
 # 拉取最新版本
 docker pull cassianvale/stock-scanner:latest
+
+# 确保本地目录存在（用于持久化日志和数据）
+mkdir -p logs data
+
+# 启动主应用容器（无需自建网络）
+docker run -d \
+  --name stock-scanner-app \
+  -p 8888:8888 \
+  -v "$(pwd)/logs:/app/logs" \
+  -v "$(pwd)/data:/app/data" \
+  -e API_KEY="你的API密钥" \
+  -e API_URL="你的API地址" \
+  -e API_MODEL="你的API模型" \
+  -e API_TIMEOUT="60" \
+  -e LOGIN_PASSWORD="你的登录密码" \
+  -e ANNOUNCEMENT_TEXT="你的公告内容" \
+  --restart unless-stopped \
+  cassianvale/stock-scanner:latest
+```
+
+- 方式B：使用 docker-compose（推荐，自动拉取镜像）
+
+```shell
+# 克隆仓库以获取 compose 文件和 Nginx 配置
+git clone https://github.com/cassianvale/stock-scanner.git
+cd stock-scanner
+
+# 创建.env并设置必要变量（参考下文说明）
+cp .env.example .env
+# 然后编辑 .env 填写 API_KEY / API_URL / API_MODEL 等
+
+# 启动（从 Docker Hub 拉取镜像）
+docker-compose -f docker-compose.simple.yml up -d
+```
+
+- 方式C：手动运行 Nginx 反向代理（可选）
+
+```shell
+# 创建自定义网络（App 和 Nginx 通过同一网络通信）
+docker network create stock-scanner-network
 
 # 启动主应用容器
 docker run -d \
@@ -36,8 +80,11 @@ docker run -d \
   -e ANNOUNCEMENT_TEXT="你的公告内容" \
   --restart unless-stopped \
   cassianvale/stock-scanner:latest
-  
-# 运行Nginx容器
+
+# 准备 Nginx 配置和目录（使用仓库中的 nginx/nginx.conf）
+mkdir -p nginx/logs nginx/ssl
+
+# 启动 Nginx 容器（将本地配置和证书目录挂载到容器）
 docker run -d \
   --name stock-scanner-nginx \
   --network stock-scanner-network \
@@ -48,26 +95,20 @@ docker run -d \
   -v "$(pwd)/nginx/ssl:/etc/nginx/ssl" \
   --restart unless-stopped \
   nginx:stable-alpine
-
-针对API_URL处理兼容更多的api地址，规则与Cherry Studio一致， /结尾忽略v1版本，#结尾强制使用输入地址。
-API_URL 处理逻辑说明：
-1. 当 API_URL 以 / 结尾时直接追加 chat/completions，保留原有版本号：
-  示例：
-   输入: https://ark.cn-beijing.volces.com/api/v3/
-   输出: https://ark.cn-beijing.volces.com/api/v3/chat/completions
-2. 当 API_URL 以 # 结尾时强制使用当前链接：
-  示例：
-   输入: https://ark.cn-beijing.volces.com/api/v3/chat/completions#
-   输出: https://ark.cn-beijing.volces.com/api/v3/chat/completions
-3. 当 API_URL 不以 / 结尾时使用默认版本号 v1：
-  示例：
-   输入: https://ark.cn-beijing.volces.com/api
-   输出: https://ark.cn-beijing.volces.com/api/v1/chat/completions
-
-
 ```
 
-默认8888端口，部署完成后访问  http://你的域名或ip:8888 即可使用  
+API_URL 处理逻辑（与 Cherry Studio 保持一致）：
+- 当 API_URL 以 / 结尾时直接追加 chat/completions，保留原有版本号：
+  - 输入: https://ark.cn-beijing.volces.com/api/v3/
+  - 输出: https://ark.cn-beijing.volces.com/api/v3/chat/completions
+- 当 API_URL 以 # 结尾时强制使用当前链接：
+  - 输入: https://ark.cn-beijing.volces.com/api/v3/chat/completions#
+  - 输出: https://ark.cn-beijing.volces.com/api/v3/chat/completions
+- 当 API_URL 不以 / 结尾时使用默认版本号 v1：
+  - 输入: https://ark.cn-beijing.volces.com/api
+  - 输出: https://ark.cn-beijing.volces.com/api/v1/chat/completions
+
+默认 8888 端口，部署完成后访问 http://你的域名或 IP:8888 即可使用  
 
 ## 使用Nginx反向代理
 
