@@ -4,9 +4,7 @@ version: '3.8'
 
 services:
   app:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: qinyz/stock_scanner:latest
     container_name: stock-scanner-app
     ports:
       - "8888:8888"
@@ -19,6 +17,7 @@ services:
       - ANNOUNCEMENT_TEXT=${ANNOUNCEMENT_TEXT}
     volumes:
       - ./logs:/app/logs
+      - ./data:/app/data
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8888/api/config"]

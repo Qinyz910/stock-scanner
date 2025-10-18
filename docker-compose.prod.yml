@@ -4,7 +4,7 @@ version: '3.8'
 
 services:
   app:
-    image: ${DOCKERHUB_USERNAME}/stock-scanner:${TAG}
+    image: qinyz/stock_scanner:${TAG:-latest}
     container_name: stock-scanner-app
     ports:
       - "8888:8888"
