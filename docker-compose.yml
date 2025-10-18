@@ -1,4 +1,4 @@
-# 本地开发和手动构建场景
+# 默认部署：单容器运行（不包含 Nginx）
 
 version: '3.8'
 
@@ -25,31 +25,3 @@ services:
       timeout: 10s
       retries: 3
       start_period: 5s
-    networks:
-      - stock-scanner-network
-
-  nginx:
-    image: nginx:stable-alpine
-    container_name: stock-scanner-nginx
-    ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf
-      - ./nginx/logs:/var/log/nginx
-      - ./nginx/ssl:/etc/nginx/ssl
-    depends_on:
-      - app
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:80"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 5s
-    networks:
-      - stock-scanner-network
-
-networks:
-  stock-scanner-network:
-    driver: bridge

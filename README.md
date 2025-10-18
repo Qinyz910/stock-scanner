@@ -141,8 +141,8 @@ openssl req -x509 -nodes -days 365 \
   -subj "/CN=localhost" \
   -addext "subjectAltName=DNS:localhost,IP:127.0.0.1"
 
-# 启动服务
-docker-compose up -d
+# 启动服务（包含 Nginx）
+docker-compose -f docker-compose.simple.yml up -d
 ```
 
 ### 使用自己的SSL证书
@@ -151,7 +151,7 @@ docker-compose up -d
 
 1. 将您的证书文件放在 `nginx/ssl/` 目录下
 2. 确保证书文件命名为 `fullchain.pem`，私钥文件命名为 `privkey.pem`
-3. 重启服务: `docker-compose restart nginx`
+3. 重启服务: `docker-compose -f docker-compose.simple.yml restart nginx`
 
 相关参考：[免费泛域名 SSL 证书申请及自动续期（使用 1Panel 面板）](https://bronya-zaychik.cn/archives/GenSSL.html)
 
