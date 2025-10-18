@@ -266,13 +266,18 @@ class AIAnalyzer:
                                         chunk_data = json.loads(line)
                                         
                                         # 检查是否有finish_reason
-                                        finish_reason = chunk_data.get("choices", [{}])[0].get("finish_reason")
+                                        choices_list = chunk_data.get("choices", [])
+                                        if not isinstance(choices_list, list) or len(choices_list) == 0:
+                                            logger.debug("流式响应中choices为空或格式异常，跳过该块")
+                                            continue
+                                        first_choice = choices_list[0] or {}
+                                        finish_reason = first_choice.get("finish_reason")
                                         if finish_reason == "stop":
                                             logger.debug("收到finish_reason=stop，流结束")
                                             continue
-                                        
+
                                         # 获取delta内容
-                                        delta = chunk_data.get("choices", [{}])[0].get("delta", {})
+                                        delta = first_choice.get("delta", {}) or {}
                                         
                                         # 检查delta是否为空对象
                                         if not delta or delta == {}:
@@ -350,7 +355,20 @@ class AIAnalyzer:
                         return
                     
                     response_data = response.json()
-                    analysis_text = response_data.get("choices", [{}])[0].get("message", {}).get("content", "")
+                    analysis_text = ""
+                    choices_list = response_data.get("choices", [])
+                    if isinstance(choices_list, list) and len(choices_list) > 0:
+                        first_choice = choices_list[0] or {}
+                        # 优先从chat格式中获取内容
+                        message = first_choice.get("message", {})
+                        if isinstance(message, dict) and message:
+                            analysis_text = message.get("content", "") or ""
+                        else:
+                            # 兼容部分提供方的text字段
+                            analysis_text = first_choice.get("text", "") or ""
+                    else:
+                        # 顶层备用字段
+                        analysis_text = response_data.get("content", "") or response_data.get("text", "") or ""
                     
                     # 尝试从分析内容中提取投资建议
                     recommendation = self._extract_recommendation(analysis_text)
