@@ -1,4 +1,5 @@
-import { defineConfig } from 'vite'
+import { defineConfig, type UserConfig } from 'vite'
+import type { UserConfig as VitestUserConfig } from 'vitest/config'
 import vue from '@vitejs/plugin-vue'
 import { fileURLToPath } from 'url'
 import { dirname, resolve } from 'path'
@@ -30,4 +31,9 @@ export default defineConfig({
       }
     },
   },
-})
+  test: {
+    environment: 'jsdom',
+    globals: true,
+    setupFiles: './vitest.setup.ts'
+  }
+} as UserConfig & { test: VitestUserConfig['test'] })
