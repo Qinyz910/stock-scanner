@@ -23,8 +23,9 @@ FROM python:3.10-slim as backend-builder
 WORKDIR /app
 
 # 安装系统依赖和构建依赖
-RUN apt-get update && apt-get install -y \
-    libgl1-mesa-glx \
+# 说明：Debian 12（bookworm）已不再提供 libgl1-mesa-glx，使用 libgl1 替代
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libgl1 \
     ca-certificates \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
@@ -42,9 +43,11 @@ FROM python:3.10-slim
 WORKDIR /app
 
 # 安装运行时依赖
-RUN apt-get update && apt-get install -y \
-    libgl1-mesa-glx \
+# 包含 curl 以便 HEALTHCHECK 使用
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libgl1 \
     ca-certificates \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 # 从构建阶段复制Python依赖
