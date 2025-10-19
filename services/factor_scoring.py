@@ -13,6 +13,7 @@ from utils.logger import get_logger
 from utils.cache import Cache
 from utils.persistence import SnapshotStore
 from services.stock_data_provider import StockDataProvider
+from services.calibration import CalibrationStore, ScoreCalibrator, CalibratorArtifact
 
 
 logger = get_logger()
@@ -50,6 +51,7 @@ class FactorScoringEngine:
         self.data_provider = data_provider or StockDataProvider()
         self.cache = cache or Cache(namespace="factor_scores")
         self.snapshot_store = snapshot_store or SnapshotStore()
+        self.calibration_store = CalibrationStore()
 
     # ============ Factor implementations ============
     @staticmethod
@@ -224,6 +226,44 @@ class FactorScoringEngine:
                 "contribs": contribs,
             })
 
+        # compute cross-sectional quantiles and calibrated probabilities
+        try:
+            totals = np.array([r["total_score"] for r in results], dtype=float)
+            n = len(totals)
+            if n > 0:
+                sorted_totals = np.sort(totals)
+                left = np.searchsorted(sorted_totals, totals, side="left").astype(float)
+                right = np.searchsorted(sorted_totals, totals, side="right").astype(float)
+                # average rank method
+                quantiles = (left + right) / 2.0 / float(n)
+            else:
+                quantiles = np.zeros(0, dtype=float)
+
+            # try to load existing calibration artifact
+            calib_key = self._build_calibration_key(factors=factors, market_type=market_type, window=window)
+            artifact = self.calibration_store.load(calib_key)
+            calibrated = None
+            if artifact is not None:
+                try:
+                    valid_until = datetime.fromisoformat(artifact.valid_until)
+                    if valid_until < datetime.utcnow():
+                        artifact = None
+                except Exception:
+                    artifact = None
+            if artifact is not None and len(totals) > 0:
+                calibrator = ScoreCalibrator(method=artifact.method)
+                calibrator.load(artifact)
+                calibrated = calibrator.predict(totals)
+            # attach metrics to results
+            for i, r in enumerate(results):
+                r["quantile"] = float(quantiles[i]) if len(quantiles) > i else 0.0
+                if calibrated is not None and len(calibrated) > i:
+                    r["calibrated_prob"] = float(calibrated[i])
+                else:
+                    r["calibrated_prob"] = float(quantiles[i]) if len(quantiles) > i else 0.0
+        except Exception as e:
+            logger.warning("Failed to enrich results with calibration info: %s", str(e))
+
         # sort by total_score desc
         results.sort(key=lambda x: x["total_score"], reverse=True)
 
@@ -331,3 +371,31 @@ class FactorScoringEngine:
         }
         m = hashlib.md5(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
         return m
+
+    @staticmethod
+    def _build_calibration_key(
+        factors: List[FactorDef],
+        market_type: str,
+        window: int,
+    ) -> str:
+        payload = {
+            "factors": [
+                {
+                    "id": f.id,
+                    "name": f.name,
+                    "weight": f.weight,
+                    "params": f.params,
+                    "transform": {
+                        "winsorize_lower": f.transform.winsorize_lower,
+                        "winsorize_upper": f.transform.winsorize_upper,
+                        "standardize": f.transform.standardize,
+                        "fillna": f.transform.fillna,
+                        "industry_neutral": f.transform.industry_neutral,
+                    },
+                }
+                for f in factors
+            ],
+            "market_type": market_type,
+            "window": window,
+        }
+        return "calib_" + hashlib.md5(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
