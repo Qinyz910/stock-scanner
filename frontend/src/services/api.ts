@@ -145,6 +145,35 @@ export const apiService = {
     }
   },
 
+  // 获取评分与贡献
+  getScores: async (params: { codes?: string[]; page?: number; pageSize?: number }): Promise<{ items: any[]; total?: number; page?: number; page_size?: number; }> => {
+    try {
+      const { codes, page, pageSize } = params || {};
+      const response = await axiosInstance.get('/scores', {
+        params: {
+          codes: codes && codes.length ? codes.join(',') : undefined,
+          page,
+          page_size: pageSize
+        }
+      });
+      const data = response.data || {};
+      let items: any[] = [];
+      if (Array.isArray(data.items)) items = data.items;
+      else if (Array.isArray(data.scores)) items = data.scores;
+      else if (Array.isArray(data.results)) items = data.results;
+      else if (Array.isArray(data)) items = data;
+      return {
+        items,
+        total: data.total ?? data.count ?? items.length,
+        page: data.page ?? data.current_page,
+        page_size: data.page_size ?? data.pageSize
+      };
+    } catch (error) {
+      console.error('获取评分时出错:', error);
+      return { items: [] };
+    }
+  },
+
   // 检查是否需要登录
   checkNeedLogin: async (): Promise<boolean> => {
     try {

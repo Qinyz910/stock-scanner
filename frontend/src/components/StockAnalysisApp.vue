@@ -149,13 +149,13 @@
                 </template>
                 
                 <template v-else-if="displayMode === 'card'">
-                  <n-grid cols="1" :x-gap="8" :y-gap="8" responsive="screen">
-                    <n-grid-item v-for="stock in analyzedStocks" :key="stock.code">
-                      <StockCard :stock="stock" />
-                    </n-grid-item>
-                  </n-grid>
+                 <n-grid cols="1" :x-gap="8" :y-gap="8" responsive="screen">
+                   <n-grid-item v-for="stock in analyzedStocks" :key="stock.code">
+                     <StockCard :stock="stock" @show-contribution="openContribDrawer" />
+                   </n-grid-item>
+                 </n-grid>
                 </template>
-                
+
                 <template v-else>
                   <div class="table-container">
                     <n-data-table
@@ -165,6 +165,7 @@
                       :row-key="(row: StockInfo) => row.code"
                       :bordered="false"
                       :single-line="false"
+                      :row-props="rowProps"
                       striped
                       :scroll-x="1200"
                     />
@@ -174,6 +175,8 @@
             </n-grid-item>
           </n-grid>
         </n-card>
+
+        <ScoreContributionDrawer v-model:show="showContribDrawer" :code="selectedStockForContrib?.code || null" />
 
       </n-layout-content>
     </n-layout>
@@ -214,6 +217,7 @@ import StockSearch from './StockSearch.vue';
 import StockCard from './StockCard.vue';
 import StreamStatusBar from './StreamStatusBar.vue';
 import AnnouncementBanner from './AnnouncementBanner.vue';
+import ScoreContributionDrawer from './ScoreContributionDrawer.vue';
 
 import { apiService } from '@/services/api';
 import { streamRequest, isStreamRequestError, type StreamChunk, type StreamRequestResult } from '@/services/streamRequest';
@@ -388,9 +392,14 @@ const stockTableColumns = ref<DataTableColumns<StockInfo>>([
     }
   },
   {
-    title: '评分',
+    title: '综合评分',
     key: 'score',
-    width: 80,
+    width: 120,
+    sorter: (rowA: StockInfo, rowB: StockInfo) => {
+      const a = rowA.score ?? Number.NEGATIVE_INFINITY;
+      const b = rowB.score ?? Number.NEGATIVE_INFINITY;
+      return a - b;
+    },
     render(row: StockInfo) {
       return row.score !== undefined ? row.score : '--';
     }
@@ -427,6 +436,22 @@ const stockTableColumns = ref<DataTableColumns<StockInfo>>([
     className: 'analysis-cell'
   }
 ]);
+
+// 综合评分贡献抽屉状态与交互
+const showContribDrawer = ref(false);
+const selectedStockForContrib = ref<StockInfo | null>(null);
+
+function openContribDrawer(row: StockInfo) {
+  selectedStockForContrib.value = row;
+  showContribDrawer.value = true;
+}
+
+function rowProps(row: StockInfo) {
+  return {
+    style: 'cursor: pointer;',
+    onClick: () => openContribDrawer(row)
+  } as any;
+}
 
 // 导出选项
 const exportOptions = [
