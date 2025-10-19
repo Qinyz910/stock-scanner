@@ -182,43 +182,42 @@ docker-compose -f docker-compose.simple.yml up -d
 ## 免责声明 (Disclaimer)
 本系统仅用于学习和研究目的，投资有风险，入市需谨慎。
 
-## Quant v2 (Experimental, feature-flagged)
+## Quant v2（实验性，特性开关控制）
 
-Overview
-- v2 introduces modular quantitative research and recommendation capabilities behind feature flags. Modules: factors, backtest, portfolio, risk, ml, recommendation.
-- v1 API and UI remain unchanged and fully supported. v2 is additive and non-breaking.
+概览
+- v2 在 /api/v2 下提供一组可插拔的量化与推荐能力，均通过特性开关启用/禁用。包含模块：factors、backtest、portfolio、risk、ml、recommendation。
+- v1 的接口与 UI 保持不变，完全兼容。v2 为增量特性，不会破坏现有使用方式。
 
-Modules and purpose
-- factors: compute classic TA factors (SMA/EMA/RSI/MACD/ATR/BBANDS) on demand.
-- backtest: run a simple long-only backtest with async job pattern and streaming logs.
-- portfolio: basic optimizers (equal weight, volatility-inverse placeholder).
-- risk: compute rolling volatility, max drawdown, mean return, Calmar ratio, risk-adjusted score (used across scoring paths).
-- ml: baseline momentum predictor stub; pluggable for custom models.
-- recommendation: aggregate per-symbol scores into ratings and simple trade plans (TP/SL/horizon) given risk appetite.
+模块与用途
+- factors：按需计算经典技术指标因子（SMA/EMA/RSI/MACD/ATR/BBANDS）。
+- backtest：异步任务化的简易买入并持有回测，支持进度日志流式输出。
+- portfolio：基础组合权重计算（等权、波动率倒数占位实现）。
+- risk：滚动波动率、最大回撤、平均收益、Calmar 比率、风险调整分数（在评分流程中复用）。
+- ml：基线动量预测示例，可替换为自定义模型。
+- recommendation：将标的分数聚合为评级与交易计划（止盈/止损/持有期），支持风险偏好。
 
-Backwards compatibility
-- All v1 endpoints remain unchanged. v2 endpoints live under /api/v2 and can be enabled per environment via feature flags.
+向后兼容性
+- v1 接口保持不变；v2 接口统一位于 /api/v2，可按环境通过特性开关启用。
 
-Feature flags (default: all disabled)
-- ENABLE_FACTORS=false
-- ENABLE_BACKTEST=false
-- ENABLE_PORTFOLIO=false
-- ENABLE_RISK=false
-- ENABLE_ML=false
-- ENABLE_RECO=false
+功能开关（默认：全部关闭）
+- ENABLE_FACTORS=false  因子模块
+- ENABLE_BACKTEST=false 回测模块
+- ENABLE_PORTFOLIO=false 组合模块
+- ENABLE_RISK=false 风险模块
+- ENABLE_ML=false 机器学习模块
+- ENABLE_RECO=false 推荐模块
 
-How to enable
-- .env file: set the flags to true (see .env.example)
-- Shell: export ENABLE_FACTORS=true ENABLE_BACKTEST=true ...
-- Docker Compose: add the flags under the app service environment.
+启用方式
+- .env 文件：将以上变量置为 true（参考 .env.example）
+- Shell：export ENABLE_FACTORS=true ENABLE_BACKTEST=true ...
+- Docker Compose：在 app 服务的 environment 中添加上述变量
 
-Dependencies
-- Redis (recommended): caching for factor computations and general use. If not available, the cache falls back to in-memory.
-  - Configure via environment: REDIS_URL or REDIS_HOST/REDIS_PORT/REDIS_DB. Health probe at GET /api/v2/health/cache.
-- Worker: backtests are executed asynchronously using an in-process ThreadPool (no external worker required). For heavier loads you can deploy a separate worker system (e.g., Celery or RQ) in the future; current release runs jobs within the API process with streaming progress.
-- Optional MLflow: if you operate custom ML models, you may integrate MLflow for model registry/tracking outside of this service. Not required for the baseline v2 features.
+依赖
+- Redis（推荐）：用于缓存因子计算等；不可用时自动回退到内存。配置 REDIS_URL 或 REDIS_HOST/REDIS_PORT/REDIS_DB；健康检查：GET /api/v2/health/cache。
+- Worker：回测使用进程内线程池异步执行，无需额外 Celery/RQ。若需更高吞吐，可部署独立任务系统；当前版本提供流式进度输出。
+- 可选 MLflow：如需对接自有模型注册/追踪，可在外部集成 MLflow；基础功能不要求。
 
-Docker Compose (local with Redis)
+Docker Compose（本地 + Redis）
 ```
 version: '3.8'
 services:
@@ -250,18 +249,18 @@ services:
       - redis
 ```
 
-Resource hints
-- Small dev box: 2 vCPU, 2 GB RAM for the app; Redis 256–512 MB. Backtests are CPU-bound; scale threads or instances for throughput.
-- Disk: ~200 MB for logs and optional snapshots; more if you enable DuckDB snapshots under data/.
-- Network: Akshare data fetches are I/O-bound; consider local mirrors in restricted environments.
+资源建议
+- 小型开发机：应用 2 vCPU / 2 GB RAM；Redis 256–512 MB。回测为 CPU 密集型；可通过提升线程或多实例扩容以提高吞吐。
+- 磁盘：日志与（可选）快照约 200 MB 起；启用 DuckDB 快照后 data/ 目录体量会增加。
+- 网络：Akshare 拉取 I/O 密集；在受限网络可考虑本地镜像。
 
-API usage (all under /api/v2)
-- List available factors
+API 使用示例（均位于 /api/v2）
+- 列出可用因子
 ```
 curl -s http://localhost:8888/api/v2/factors
 ```
 
-- Compute factors
+- 计算因子
 ```
 curl -s -X POST http://localhost:8888/api/v2/factors/compute \
   -H "Content-Type: application/json" \
@@ -278,9 +277,9 @@ curl -s -X POST http://localhost:8888/api/v2/factors/compute \
   }'
 ```
 
-- Run a backtest (async job pattern)
+- 运行回测（异步任务）
 ```
-# 1) Submit job
+# 1) 提交任务
 curl -s -X POST http://localhost:8888/api/v2/backtest/run \
   -H "Content-Type: application/json" \
   -d '{
@@ -292,21 +291,21 @@ curl -s -X POST http://localhost:8888/api/v2/backtest/run \
   }'
 # => {"job_id":"<id>"}
 
-# 2) Poll job status/result
+# 2) 轮询任务状态/结果
 curl -s http://localhost:8888/api/v2/backtest/<job_id>
 
-# 3) Stream logs/progress (server-sent json lines)
+# 3) 流式获取日志/进度（按行 JSON）
 curl -s -N http://localhost:8888/api/v2/backtest/<job_id>/stream
 ```
 
-- Portfolio optimize
+- 组合优化
 ```
 curl -s -X POST http://localhost:8888/api/v2/portfolio/optimize \
   -H "Content-Type: application/json" \
   -d '{"symbols": ["AAPL","MSFT","GOOG"], "method": "equal"}'
 ```
 
-- ML predict (baseline momentum)
+- 机器学习预测（基线动量）
 ```
 curl -s -X POST http://localhost:8888/api/v2/ml/predict \
   -H "Content-Type: application/json" \
@@ -318,7 +317,7 @@ curl -s -X POST http://localhost:8888/api/v2/ml/predict \
   }'
 ```
 
-- Signals recommend
+- 交易信号推荐
 ```
 curl -s -X POST http://localhost:8888/api/v2/signals/recommend \
   -H "Content-Type: application/json" \
@@ -329,27 +328,27 @@ curl -s -X POST http://localhost:8888/api/v2/signals/recommend \
   }'
 ```
 
-Migrations
-- Default deployment uses DuckDB/CSV for optional factor snapshots and requires no database migrations.
-- If you introduce a SQL database, follow an additive-only migration policy (no breaking changes). Suggested flow:
-  - Create migrations: alembic revision -m "add <table/column>"
-  - Apply: alembic upgrade head
-  - Roll forward only; never drop or rename in-place during release.
-  - Stage first: apply migrations in staging, run smoke backtests and factor computes, then promote to prod.
+数据迁移
+- 默认使用 DuckDB/CSV（可选）保存快照，无需数据库迁移。
+- 若引入 SQL 数据库，遵循“仅增不破坏”迁移策略。建议：
+  - 生成迁移：alembic revision -m "add <table/column>"
+  - 应用迁移：alembic upgrade head
+  - 只前滚；发布期间不做删除/重命名
+  - 先在 Staging 执行迁移并做因子计算与回测冒烟，再发布到生产
 
-Security and limits
-- JWT: When LOGIN_PASSWORD is set, v1 endpoints require obtaining a bearer token from POST /api/login and sending Authorization: Bearer <token>. v2 endpoints are currently system-to-system and do not require JWT by default; protect them via network policy, ingress rules, or a reverse proxy if needed.
-- Rate limits: No built-in limiter; apply at Nginx/ingress (e.g., limit_req) or an API gateway.
-- Payload caps: Keep symbol lists small for latency (suggest <= 100). Backtests are CPU-bound; prefer <= 20 symbols per job in small instances.
-- ML guardrails: The baseline ML endpoint does not call external services. If you swap in custom models, avoid training/inferring on private data that could leak via logs or responses; scrub logs and validate prompts.
+安全与限制
+- JWT：当配置 LOGIN_PASSWORD 时，v1 接口需先通过 POST /api/login 获取令牌并在请求头携带 Authorization: Bearer <token>。v2 目前默认不强制 JWT；如需保护，请在网络策略/Ingress/反向代理层做访问控制。
+- 频率限制：未内置限流；可在 Nginx/Ingress 或 API 网关配置。
+- 请求与负载：为保证延迟，建议单次 symbols <= 100；小规格机器回测建议每任务 <= 20 个标的。
+- ML 防泄漏：基线 ML 不访问外部服务。接入自定义模型时，请避免在日志/返回中泄露私有数据，做好脱敏与校验。
 
-Observability
-- Prometheus metrics at /metrics (enabled when prometheus_client is installed):
-  - api_latency_seconds Histogram labels: path, method, status
-  - cache_hits_total and cache_misses_total Counters
-  - backtest_job_duration_seconds Histogram
+可观测性
+- /metrics 暴露 Prometheus 指标（安装 prometheus_client 时有效）：
+  - api_latency_seconds 直方图（标签 path, method, status）
+  - cache_hits_total 与 cache_misses_total 计数器
+  - backtest_job_duration_seconds 直方图
   - process_memory_rss_bytes Gauge
-- Suggested Prometheus scrape_config
+- Prometheus 抓取配置示例
 ```
 scrape_configs:
   - job_name: stock-scanner
@@ -358,23 +357,28 @@ scrape_configs:
     metrics_path: /metrics
 ```
 
-Quickstart (local dev)
-- Install
+- 仪表盘建议：
+  - API 延迟分布（按 path/method 维度）
+  - 缓存命中率与未命中数（hits/misses）
+  - 回测任务时长分布（成功/失败）
+
+快速开始（本地开发）
+- 安装
 ```
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 ```
-- Start Redis (optional, recommended)
+- 启动 Redis（可选，推荐）
 ```
 docker run -d --name redis -p 6379:6379 redis:7-alpine
 ```
-- Enable v2 and run API
+- 启用 v2 并启动 API
 ```
 export ENABLE_FACTORS=true ENABLE_BACKTEST=true ENABLE_PORTFOLIO=true ENABLE_RISK=true ENABLE_ML=true ENABLE_RECO=true
 export ENABLE_CACHE=true REDIS_HOST=localhost REDIS_PORT=6379
 uvicorn web_server:app --host 0.0.0.0 --port 8888 --reload
 ```
-- Try one end-to-end example
+- 端到端示例
 ```
 curl -s -X POST http://localhost:8888/api/v2/factors/compute \
   -H "Content-Type: application/json" \
@@ -382,11 +386,11 @@ curl -s -X POST http://localhost:8888/api/v2/factors/compute \
 ```
 
 OpenAPI
-- Swagger UI: http://localhost:8888/docs (look for tag "v2"). ReDoc: http://localhost:8888/redoc
-- v1 remains supported and unchanged; v2 endpoints are additive under /api/v2.
+- Swagger UI: http://localhost:8888/docs（查看标签“v2”）；ReDoc: http://localhost:8888/redoc
+- v1 保持支持不变；v2 为 /api/v2 下的增量接口
 
-Observability note
-- If prometheus_client is not installed, /metrics will return an empty payload and all metrics are no-ops.
+可观测性说明
+- 未安装 prometheus_client 时，/metrics 返回空内容，指标为 no-op。
 
-Caching note
-- utils.cache.Cache automatically uses Redis when available, with an in-memory fallback. Includes decorators, a health probe, and Prometheus hit/miss metrics.
+缓存说明
+- utils.cache.Cache 在存在 Redis 时自动使用 Redis，否则回退到内存；内置函数装饰器、健康检查与命中/未命中指标。
