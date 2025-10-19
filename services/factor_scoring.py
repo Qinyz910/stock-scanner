@@ -14,6 +14,15 @@ from utils.cache import Cache
 from utils.persistence import SnapshotStore
 from services.stock_data_provider import StockDataProvider
 from services.calibration import CalibrationStore, ScoreCalibrator, CalibratorArtifact
+from services.risk_metrics import (
+    rolling_volatility,
+    mean_return,
+    max_drawdown,
+    calmar_ratio,
+    risk_adjusted_score as ra_score_fn,
+    bootstrap_mean_ci,
+    confidence_from_ci,
+)
 
 
 logger = get_logger()
@@ -225,6 +234,105 @@ class FactorScoringEngine:
                 "total_score": float(total),
                 "contribs": contribs,
             })
+
+        # compute risk metrics cross-sectionally and risk-adjusted scores
+        try:
+            vols: Dict[str, float] = {}
+            mrets: Dict[str, float] = {}
+            dds: Dict[str, float] = {}
+            calmars: Dict[str, float] = {}
+            ras: Dict[str, float] = {}
+            ci_widths: Dict[str, float] = {}
+            for sym in symbols:
+                df = data_map.get(sym)
+                if df is None or df.empty or "Close" not in df.columns:
+                    vols[sym] = np.nan
+                    mrets[sym] = np.nan
+                    dds[sym] = np.nan
+                    calmars[sym] = np.nan
+                    ras[sym] = np.nan
+                    ci_widths[sym] = np.nan
+                    continue
+                close = df["Close"].astype(float)
+                vol = rolling_volatility(close, window)
+                mr = mean_return(close, window)
+                dd = max_drawdown(close, window)
+                cal = calmar_ratio(close, window)
+                ra_val = ra_score_fn(close, window)
+                # bootstrap CI for mean return
+                r = close.pct_change().dropna()
+                low, high = bootstrap_mean_ci(r, n_boot=200, ci=0.95)
+                width = (high - low) if np.isfinite(high) and np.isfinite(low) else np.nan
+                vols[sym] = vol
+                mrets[sym] = mr
+                dds[sym] = dd
+                calmars[sym] = cal
+                ras[sym] = ra_val
+                ci_widths[sym] = width
+
+            vol_series = pd.Series(vols)
+            ra_series = pd.Series(ras)
+            dd_series = pd.Series(dds)
+            mret_series = pd.Series(mrets)
+            ciw_series = pd.Series(ci_widths)
+            # standardize risk-adjusted value to be comparable
+            if ra_series.notna().sum() > 1:
+                ra_mean = ra_series.mean()
+                ra_std = ra_series.std(ddof=0)
+                if np.isfinite(ra_std) and ra_std > 0:
+                    ra_z = (ra_series - ra_mean) / ra_std
+                else:
+                    ra_z = pd.Series(0.0, index=ra_series.index)
+            else:
+                ra_z = pd.Series(0.0, index=ra_series.index)
+
+            # risk tag thresholds
+            try:
+                vol_q50 = float(vol_series.quantile(0.5)) if vol_series.notna().sum() else np.nan
+                vol_q75 = float(vol_series.quantile(0.75)) if vol_series.notna().sum() else np.nan
+            except Exception:
+                vol_q50 = np.nan
+                vol_q75 = np.nan
+
+            # build lookup
+            a_results: Dict[str, Dict[str, Any]] = {r["symbol"]: r for r in results}
+            for sym in symbols:
+                rdict = a_results.get(sym)
+                if rdict is None:
+                    continue
+                vol = float(vol_series.get(sym, np.nan))
+                mr = float(mret_series.get(sym, np.nan))
+                dd = float(dd_series.get(sym, np.nan))
+                cal = float(calmars.get(sym, np.nan))
+                ra = float(ra_z.get(sym, 0.0))
+                width = float(ciw_series.get(sym, np.nan))
+                conf = confidence_from_ci(width, mr)
+                # additional penalty by high volatility
+                if np.isfinite(vol):
+                    conf = float(max(0.0, min(1.0, conf * (1.0 / (1.0 + max(vol, 0.0) * 50.0)))))
+                # risk tag
+                tag = "unknown"
+                try:
+                    if (np.isfinite(vol_q75) and np.isfinite(vol) and vol >= vol_q75) or (np.isfinite(dd) and dd >= 0.2):
+                        tag = "high"
+                    elif (np.isfinite(vol_q50) and np.isfinite(vol) and vol >= vol_q50) or (np.isfinite(dd) and dd >= 0.1):
+                        tag = "medium"
+                    else:
+                        tag = "low"
+                except Exception:
+                    tag = "low"
+
+                rdict["risk_metrics"] = {
+                    "volatility": vol if np.isfinite(vol) else None,
+                    "max_drawdown": dd if np.isfinite(dd) else None,
+                    "calmar_ratio": cal if np.isfinite(cal) else None,
+                    "mean_return": mr if np.isfinite(mr) else None,
+                }
+                rdict["risk_adjusted_score"] = float(ra)
+                rdict["confidence"] = float(conf)
+                rdict["risk_tag"] = tag
+        except Exception as e:
+            logger.warning("Failed to compute risk metrics: %s", str(e))
 
         # compute cross-sectional quantiles and calibrated probabilities
         try:

@@ -37,6 +37,10 @@ export interface StockInfo {
   macd_signal?: string;
   volume_status?: string;
   analysis_date?: string;
+  // 风险与置信度
+  risk_adjusted_score?: number;
+  confidence?: number;
+  risk_tag?: 'low' | 'medium' | 'high' | string;
 }
 
 export interface SearchResult {
@@ -108,4 +112,7 @@ export interface StreamAnalysisUpdate {
   volume_status?: string;
   analysis_date?: string;
   ai_analysis_chunk?: string;
+  risk_adjusted_score?: number;
+  confidence?: number;
+  risk_tag?: 'low' | 'medium' | 'high' | string;
 }

@@ -6,6 +6,16 @@ from services.stock_data_provider import StockDataProvider
 from services.technical_indicator import TechnicalIndicator
 from services.stock_scorer import StockScorer
 from services.ai_analyzer import AIAnalyzer
+import numpy as np
+from services.risk_metrics import (
+    rolling_volatility,
+    mean_return,
+    max_drawdown,
+    calmar_ratio,
+    risk_adjusted_score as ra_score_fn,
+    bootstrap_mean_ci,
+    confidence_from_ci,
+)
 
 # 获取日志器
 logger = get_logger()
@@ -138,7 +148,40 @@ class StockAnalyzerService:
                 
             # 当前分析日期
             analysis_date = datetime.now().strftime('%Y-%m-%d')
-            
+
+            # 计算风险指标与风险调整
+            try:
+                close = df_with_indicators['Close'].astype(float)
+                # 使用20日窗口估计短期风险
+                _win = 20
+                vol = rolling_volatility(close, _win)
+                mr = mean_return(close, _win)
+                dd = max_drawdown(close, _win)
+                cal = calmar_ratio(close, _win)
+                ra_val = ra_score_fn(close, _win)
+                # 置信度：基于均值自举区间，并对高波动做惩罚
+                r = close.pct_change().dropna()
+                low_ci, high_ci = bootstrap_mean_ci(r, n_boot=200, ci=0.95)
+                width = (high_ci - low_ci) if np.isfinite(high_ci) and np.isfinite(low_ci) else np.nan
+                confidence = confidence_from_ci(width, mr)
+                if np.isfinite(vol):
+                    confidence = float(max(0.0, min(1.0, confidence * (1.0 / (1.0 + max(vol, 0.0) * 50.0)))))
+                # 风险标签
+                if (np.isfinite(vol) and vol >= 0.03) or (np.isfinite(dd) and dd >= 0.2):
+                    risk_tag = "high"
+                elif (np.isfinite(vol) and vol >= 0.015) or (np.isfinite(dd) and dd >= 0.1):
+                    risk_tag = "medium"
+                else:
+                    risk_tag = "low"
+            except Exception:
+                vol = np.nan
+                mr = np.nan
+                dd = np.nan
+                cal = np.nan
+                ra_val = 0.0
+                confidence = 0.5
+                risk_tag = "low"
+
             # 生成基本分析结果
             basic_result = {
                 "stock_code": stock_code,
@@ -154,19 +197,28 @@ class StockAnalyzerService:
                 "macd_signal": macd_signal,
                 "volume_status": volume_status,
                 "recommendation": recommendation,
-                "ai_analysis": ""
+                "ai_analysis": "",
+                "risk_adjusted_score": float(ra_val),
+                "confidence": float(confidence),
+                "risk_tag": risk_tag,
+                "risk_metrics": {
+                    "volatility": float(vol) if np.isfinite(vol) else None,
+                    "max_drawdown": float(dd) if np.isfinite(dd) else None,
+                    "calmar_ratio": float(cal) if np.isfinite(cal) else None,
+                    "mean_return": float(mr) if np.isfinite(mr) else None,
+                },
             }
-            
+
             # 输出基本分析结果
             logger.info(f"基本分析结果: {json.dumps(basic_result)}")
             yield json.dumps(basic_result)
-            
+
             # 使用AI进行深入分析
             async for analysis_chunk in self.ai_analyzer.get_ai_analysis(df_with_indicators, stock_code, market_type, stream):
                 yield analysis_chunk
-                
+
             logger.info(f"完成股票分析: {stock_code}")
-            
+
         except Exception as e:
             error_msg = f"分析股票 {stock_code} 时出错: {str(e)}"
             logger.error(error_msg)
@@ -233,6 +285,36 @@ class StockAnalyzerService:
                     
                     # 获取涨跌幅
                     change_percent = latest_data.get('Change_pct')
+
+                    # 计算风险指标
+                    try:
+                        close = df['Close'].astype(float)
+                        _win = 20
+                        vol = rolling_volatility(close, _win)
+                        mr = mean_return(close, _win)
+                        dd = max_drawdown(close, _win)
+                        cal = calmar_ratio(close, _win)
+                        ra_val = ra_score_fn(close, _win)
+                        r = close.pct_change().dropna()
+                        low_ci, high_ci = bootstrap_mean_ci(r, n_boot=150, ci=0.95)
+                        width = (high_ci - low_ci) if np.isfinite(high_ci) and np.isfinite(low_ci) else np.nan
+                        confidence = confidence_from_ci(width, mr)
+                        if np.isfinite(vol):
+                            confidence = float(max(0.0, min(1.0, confidence * (1.0 / (1.0 + max(vol, 0.0) * 50.0)))))
+                        if (np.isfinite(vol) and vol >= 0.03) or (np.isfinite(dd) and dd >= 0.2):
+                            risk_tag = "high"
+                        elif (np.isfinite(vol) and vol >= 0.015) or (np.isfinite(dd) and dd >= 0.1):
+                            risk_tag = "medium"
+                        else:
+                            risk_tag = "low"
+                    except Exception:
+                        vol = np.nan
+                        mr = np.nan
+                        dd = np.nan
+                        cal = np.nan
+                        ra_val = 0.0
+                        confidence = 0.5
+                        risk_tag = "low"
                     
                     # 发送股票基本信息和评分
                     yield json.dumps({
@@ -247,7 +329,16 @@ class StockAnalyzerService:
                         "ma_trend": "UP" if latest_data.get('MA5', 0) > latest_data.get('MA20', 0) else "DOWN",
                         "macd_signal": "BUY" if latest_data.get('MACD', 0) > latest_data.get('MACD_Signal', 0) else "SELL",
                         "volume_status": "HIGH" if latest_data.get('Volume_Ratio', 1) > 1.5 else ("LOW" if latest_data.get('Volume_Ratio', 1) < 0.5 else "NORMAL"),
-                        "status": "completed" if score < min_score else "waiting"
+                        "status": "completed" if score < min_score else "waiting",
+                        "risk_adjusted_score": float(ra_val),
+                        "confidence": float(confidence),
+                        "risk_tag": risk_tag,
+                        "risk_metrics": {
+                            "volatility": float(vol) if np.isfinite(vol) else None,
+                            "max_drawdown": float(dd) if np.isfinite(dd) else None,
+                            "calmar_ratio": float(cal) if np.isfinite(cal) else None,
+                            "mean_return": float(mr) if np.isfinite(mr) else None,
+                        },
                     })
             
             # 如果需要进一步分析，对评分较高的股票进行AI分析

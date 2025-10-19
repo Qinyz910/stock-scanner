@@ -97,6 +97,15 @@
                           { label: '表格视图', value: 'table' }
                         ]"
                       />
+                      <n-select
+                        v-model:value="sortMode"
+                        size="small"
+                        style="width: 150px"
+                        :options="[
+                          { label: '排序: 默认', value: 'normal' },
+                          { label: '排序: 风险调整', value: 'risk' }
+                        ]"
+                      />
                       <n-button 
                         size="small" 
                         :disabled="analyzedStocks.length === 0 || isAnalyzing"
@@ -242,6 +251,7 @@ const stockCodes = ref('');
 const isAnalyzing = ref(false);
 const analyzedStocks = ref<StockInfo[]>([]);
 const displayMode = ref<'card' | 'table'>('card');
+const sortMode = ref<'normal' | 'risk'>('normal');
 const abortControllerRef = ref<AbortController | null>(null);
 const activeStream = ref<StreamRequestResult | null>(null);
 const totalStocksCount = ref(0);
@@ -396,9 +406,9 @@ const stockTableColumns = ref<DataTableColumns<StockInfo>>([
     key: 'score',
     width: 120,
     sorter: (rowA: StockInfo, rowB: StockInfo) => {
-      const a = rowA.score ?? Number.NEGATIVE_INFINITY;
-      const b = rowB.score ?? Number.NEGATIVE_INFINITY;
-      return a - b;
+      const valA = sortMode.value === 'risk' ? (rowA.risk_adjusted_score ?? rowA.score ?? Number.NEGATIVE_INFINITY) : (rowA.score ?? Number.NEGATIVE_INFINITY);
+      const valB = sortMode.value === 'risk' ? (rowB.risk_adjusted_score ?? rowB.score ?? Number.NEGATIVE_INFINITY) : (rowB.score ?? Number.NEGATIVE_INFINITY);
+      return valA - valB;
     },
     render(row: StockInfo) {
       return row.score !== undefined ? row.score : '--';
@@ -694,6 +704,17 @@ function applyStreamUpdate(data: StreamAnalysisUpdate) {
       stock.analysis_date = data.analysis_date;
     }
     
+    // 风险与置信度
+    if ((data as any).risk_adjusted_score !== undefined) {
+      stock.risk_adjusted_score = (data as any).risk_adjusted_score as number;
+    }
+    if ((data as any).confidence !== undefined) {
+      stock.confidence = (data as any).confidence as number;
+    }
+    if ((data as any).risk_tag !== undefined) {
+      stock.risk_tag = (data as any).risk_tag as any;
+    }
+
     // 使用Vue的响应式API更新数组
     analyzedStocks.value[stockIndex] = stock;
   }
