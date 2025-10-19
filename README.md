@@ -181,3 +181,29 @@ docker-compose -f docker-compose.simple.yml up -d
 
 ## 免责声明 (Disclaimer)
 本系统仅用于学习和研究目的，投资有风险，入市需谨慎。
+
+## Quant v2 (Experimental, feature-flagged)
+
+New non-breaking modules are added under /api/v2 and are disabled by default via feature flags. Enable them in environment by setting the following to true:
+- ENABLE_FACTORS
+- ENABLE_BACKTEST
+- ENABLE_PORTFOLIO
+- ENABLE_RISK
+- ENABLE_ML
+- ENABLE_RECO
+
+Endpoints (all under /api/v2):
+- GET /factors -> list available TA factors
+- POST /factors/compute -> compute SMA/EMA/RSI/MACD/ATR/BBANDS for given symbols and range
+- POST /backtest/run -> enqueue a simple long-only backtest; returns job_id
+- GET /backtest/{job_id} -> job status/result
+- GET /backtest/{job_id}/stream -> streaming progress logs
+- POST /portfolio/optimize -> lightweight equal/vol-inverse weights
+- POST /ml/predict -> baseline momentum predictor stub
+- POST /signals/recommend -> aggregate scores to rating and trade plan
+
+Observability:
+- Prometheus metrics endpoint exposed at /metrics (API latency histograms, cache metrics, backtest durations; auto no-op if prometheus_client not installed).
+
+Caching:
+- New cache wrapper utils.cache.Cache with Redis pool support, in-memory fallback, decorators, health probe, and Prometheus hit/miss metrics.
