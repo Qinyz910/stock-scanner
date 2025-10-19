@@ -72,13 +72,21 @@
       </div>
     </div>
     
-    <div class="analysis-date" v-if="stock.analysis_date">
-      <n-tag type="info" size="small">
-        <template #icon>
-          <n-icon><CalendarOutline /></n-icon>
-        </template>
-        分析日期: {{ formatDate(stock.analysis_date) }}
-      </n-tag>
+    <div class="analysis-date" v-if="stock.analysis_date || stock.risk_tag || stock.confidence !== undefined">
+      <n-space align="center" :wrap="false">
+        <n-tag v-if="stock.analysis_date" type="info" size="small">
+          <template #icon>
+            <n-icon><CalendarOutline /></n-icon>
+          </template>
+          分析日期: {{ formatDate(stock.analysis_date) }}
+        </n-tag>
+        <n-tag v-if="stock.risk_tag" :type="riskTagType" size="small" round>
+          {{ riskTagText }}
+        </n-tag>
+        <n-tag v-if="isLowConfidence" type="warning" size="small" round>
+          低置信度
+        </n-tag>
+      </n-space>
     </div>
     
     <div class="technical-indicators" v-if="hasAnyTechnicalIndicator">
@@ -148,7 +156,7 @@
 
 <script setup lang="ts">
 import { computed, watch, ref, nextTick, onMounted, onBeforeUnmount } from 'vue';
-import { NCard, NDivider, NIcon, NTag, NButton, useMessage } from 'naive-ui';
+import { NCard, NDivider, NIcon, NTag, NButton, useMessage, NSpace } from 'naive-ui';
 import { 
   AlertCircleOutline as AlertCircleIcon,
   CalendarOutline,
@@ -328,6 +336,28 @@ function getChineseVolumeStatus(status: string): string {
   
   return statusMap[status] || status;
 }
+
+const riskTagType = computed(() => {
+  switch (props.stock.risk_tag) {
+    case 'high': return 'error';
+    case 'medium': return 'warning';
+    case 'low': return 'success';
+    default: return 'default';
+  }
+});
+
+const riskTagText = computed(() => {
+  switch (props.stock.risk_tag) {
+    case 'high': return '高风险';
+    case 'medium': return '中风险';
+    case 'low': return '低风险';
+    default: return '风险未知';
+  }
+});
+
+const isLowConfidence = computed(() => {
+  return typeof props.stock.confidence === 'number' && props.stock.confidence < 0.4;
+});
 
 const message = useMessage();
 
