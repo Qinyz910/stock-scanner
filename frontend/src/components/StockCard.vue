@@ -59,6 +59,12 @@
       <div class="summary-item score-item" v-if="stock.score !== undefined">
         <div class="summary-value" :class="getScoreClass(stock.score)">{{ stock.score }}</div>
         <div class="summary-label">评分</div>
+        <n-button quaternary size="tiny" class="contrib-btn" @click="showContribution">
+          <template #icon>
+            <n-icon><StatsChartOutline /></n-icon>
+          </template>
+          贡献
+        </n-button>
       </div>
       <div class="summary-item recommendation-item" v-if="stock.recommendation">
         <div class="summary-value recommendation">{{ stock.recommendation }}</div>
@@ -148,7 +154,8 @@ import {
   CalendarOutline,
   CopyOutline,
   HourglassOutline,
-  ReloadOutline
+  ReloadOutline,
+  StatsChartOutline
 } from '@vicons/ionicons5';
 import { parseMarkdown } from '@/utils';
 import type { StockInfo } from '@/types';
@@ -156,6 +163,14 @@ import type { StockInfo } from '@/types';
 const props = defineProps<{
   stock: StockInfo;
 }>();
+
+const emit = defineEmits<{
+  (e: 'show-contribution', stock: StockInfo): void;
+}>();
+
+function showContribution() {
+  emit('show-contribution', props.stock);
+}
 
 const isAnalyzing = computed(() => {
   return props.stock.analysisStatus === 'analyzing';
