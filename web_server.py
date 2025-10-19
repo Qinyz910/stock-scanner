@@ -8,6 +8,7 @@ from typing import List, Optional, Dict, Any, Generator
 from services.stock_analyzer_service import StockAnalyzerService
 from services.us_stock_service_async import USStockServiceAsync
 from services.fund_service_async import FundServiceAsync
+from services.factor_scoring import FactorScoringEngine, FactorDef, TransformConfig
 import os
 import httpx
 from utils.logger import get_logger
@@ -54,6 +55,8 @@ app.add_middleware(
 # 初始化异步服务
 us_stock_service = USStockServiceAsync()
 fund_service = FundServiceAsync()
+# 因子评分引擎
+factor_engine = FactorScoringEngine()
 
 # 定义请求和响应模型
 class AnalyzeRequest(BaseModel):
@@ -69,6 +72,31 @@ class TestAPIRequest(BaseModel):
     api_key: str
     api_model: Optional[str] = None
     api_timeout: Optional[int] = 10
+
+class TransformModel(BaseModel):
+    winsorize_lower: float = 0.05
+    winsorize_upper: float = 0.95
+    standardize: bool = True
+    fillna: Optional[float] = None
+    industry_neutral: bool = False
+
+class FactorModel(BaseModel):
+    id: str
+    name: Optional[str] = None
+    weight: float = 1.0
+    params: Dict[str, Any] = Field(default_factory=dict)
+    transform: TransformModel = Field(default_factory=TransformModel)
+
+class ScoresRequest(BaseModel):
+    symbols: List[str]
+    market_type: str = "A"
+    factors: List[FactorModel]
+    window: int = 20
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+    industries: Optional[Dict[str, str]] = None
+    page: int = 1
+    page_size: int = 100
 
 class LoginRequest(BaseModel):
     password: str
@@ -258,6 +286,53 @@ async def analyze(request: AnalyzeRequest, username: str = Depends(verify_token)
         logger.error(error_msg)
         logger.exception(e)
         raise HTTPException(status_code=500, detail=error_msg)
+
+# 因子评分 API
+@app.post("/api/scores")
+async def compute_scores(request: ScoresRequest, username: str = Depends(verify_token)):
+    try:
+        if not request.symbols:
+            raise HTTPException(status_code=400, detail="请输入代码")
+        symbols = list(dict.fromkeys([s.strip() for s in request.symbols]))
+        if not request.factors:
+            raise HTTPException(status_code=400, detail="请提供因子列表")
+
+        factor_defs: List[FactorDef] = []
+        for f in request.factors:
+            tcfg = TransformConfig(
+                winsorize_lower=f.transform.winsorize_lower,
+                winsorize_upper=f.transform.winsorize_upper,
+                standardize=f.transform.standardize,
+                fillna=f.transform.fillna,
+                industry_neutral=f.transform.industry_neutral,
+            )
+            factor_defs.append(
+                FactorDef(
+                    id=f.id,
+                    name=f.name,
+                    weight=f.weight,
+                    params=dict(f.params or {}),
+                    transform=tcfg,
+                )
+            )
+
+        result = await factor_engine.score(
+            symbols=symbols,
+            factors=factor_defs,
+            market_type=request.market_type,
+            window=request.window,
+            start_date=request.start_date,
+            end_date=request.end_date,
+            industries=request.industries,
+            page=request.page,
+            page_size=request.page_size,
+        )
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"计算因子评分时出错: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 # 搜索美股代码
 @app.get("/api/search_us_stocks")
