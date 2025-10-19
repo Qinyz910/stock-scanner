@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import time
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
@@ -11,7 +10,6 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from utils.cache import Cache
-from utils.feature_flags import is_enabled
 from services.stock_data_provider import StockDataProvider
 from services.quant.factors import REGISTRY as FACTORS_REG
 from services.quant.backtest import run_backtest, BacktestParams
@@ -76,16 +74,11 @@ async def cache_health():
 # --------- Factor endpoints ---------
 @api_v2_router.get("/factors")
 async def list_factors():
-    if not is_enabled("ENABLE_FACTORS"):
-        raise HTTPException(status_code=403, detail="Factors module disabled")
     return {"factors": FACTORS_REG.list()}
 
 
 @api_v2_router.post("/factors/compute")
 async def factors_compute(req: FactorComputeRequest):
-    if not is_enabled("ENABLE_FACTORS"):
-        raise HTTPException(status_code=403, detail="Factors module disabled")
-
     if not req.symbols:
         raise HTTPException(status_code=400, detail="symbols required")
     if not req.factors:
@@ -138,9 +131,6 @@ async def factors_compute(req: FactorComputeRequest):
 # --------- Backtest endpoints ---------
 @api_v2_router.post("/backtest/run")
 async def backtest_run(req: BacktestRunRequest):
-    if not is_enabled("ENABLE_BACKTEST"):
-        raise HTTPException(status_code=403, detail="Backtest module disabled")
-
     p = BacktestParams(
         start_date=req.start_date,
         end_date=req.end_date,
@@ -158,8 +148,6 @@ async def backtest_run(req: BacktestRunRequest):
 
 @api_v2_router.get("/backtest/{job_id}")
 async def backtest_status(job_id: str):
-    if not is_enabled("ENABLE_BACKTEST"):
-        raise HTTPException(status_code=403, detail="Backtest module disabled")
     job = GLOBAL_TASK_QUEUE.get(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="job not found")
@@ -168,9 +156,6 @@ async def backtest_status(job_id: str):
 
 @api_v2_router.get("/backtest/{job_id}/stream")
 async def backtest_stream(job_id: str):
-    if not is_enabled("ENABLE_BACKTEST"):
-        raise HTTPException(status_code=403, detail="Backtest module disabled")
-
     async def gen():
         last_len = 0
         while True:
@@ -196,8 +181,6 @@ async def backtest_stream(job_id: str):
 # --------- Portfolio ---------
 @api_v2_router.post("/portfolio/optimize")
 async def portfolio_optimize(req: PortfolioOptimizeRequest):
-    if not is_enabled("ENABLE_PORTFOLIO"):
-        raise HTTPException(status_code=403, detail="Portfolio module disabled")
     # simple equal weight or volatility inverse placeholder
     if not req.symbols:
         raise HTTPException(status_code=400, detail="symbols required")
@@ -208,8 +191,6 @@ async def portfolio_optimize(req: PortfolioOptimizeRequest):
 # --------- ML ---------
 @api_v2_router.post("/ml/predict")
 async def ml_predict(req: MLPredictRequest):
-    if not is_enabled("ENABLE_ML"):
-        raise HTTPException(status_code=403, detail="ML module disabled")
     data_map = await provider.get_multiple_stocks_data(req.symbols, req.market, req.start_date, req.end_date, max_concurrency=8)
     window = 5
     scores = {}
@@ -232,8 +213,6 @@ async def ml_predict(req: MLPredictRequest):
 # --------- Recommendation ---------
 @api_v2_router.post("/signals/recommend")
 async def recommend(req: RecommendRequest):
-    if not is_enabled("ENABLE_RECO"):
-        raise HTTPException(status_code=403, detail="Recommendation module disabled")
     symbols = req.symbols
     if not symbols:
         raise HTTPException(status_code=400, detail="symbols required")

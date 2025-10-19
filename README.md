@@ -182,20 +182,18 @@ docker-compose -f docker-compose.simple.yml up -d
 ## 免责声明 (Disclaimer)
 本系统仅用于学习和研究目的，投资有风险，入市需谨慎。
 
-## Quant v2 (Experimental, feature-flagged)
+## Quant v2 (Always-on, backward compatible)
 
-New non-breaking modules are added under /api/v2 and are disabled by default via feature flags. Enable them in environment by setting the following to true:
-- ENABLE_FACTORS
-- ENABLE_BACKTEST
-- ENABLE_PORTFOLIO
-- ENABLE_RISK
-- ENABLE_ML
-- ENABLE_RECO
+New quantitative and recommendation capabilities are exposed under /api/v2 and are enabled by default. No environment feature flags are required. All existing v1 APIs and flows remain unchanged.
+
+Auto-detection and graceful degradation:
+- Cache: If Redis is reachable (via REDIS_URL or REDIS_HOST/PORT/DB), it will be used; otherwise the system falls back to an in-memory TTL cache. Health endpoint: GET /api/v2/health/cache. Prometheus metrics include cache hit/miss.
+- Task queue: Long-running jobs (e.g., backtests) run via an in-process async queue by default, with progress logs available via streaming. No external worker is required; the system remains usable in minimal environments.
 
 Endpoints (all under /api/v2):
 - GET /factors -> list available TA factors
 - POST /factors/compute -> compute SMA/EMA/RSI/MACD/ATR/BBANDS for given symbols and range
-- POST /backtest/run -> enqueue a simple long-only backtest; returns job_id
+- POST /backtest/run -> submit a simple long-only backtest; returns job_id
 - GET /backtest/{job_id} -> job status/result
 - GET /backtest/{job_id}/stream -> streaming progress logs
 - POST /portfolio/optimize -> lightweight equal/vol-inverse weights
@@ -203,7 +201,7 @@ Endpoints (all under /api/v2):
 - POST /signals/recommend -> aggregate scores to rating and trade plan
 
 Observability:
-- Prometheus metrics endpoint exposed at /metrics (API latency histograms, cache metrics, backtest durations; auto no-op if prometheus_client not installed).
+- Prometheus metrics endpoint exposed at /metrics (API latency histograms, cache metrics, backtest durations; auto no-op if prometheus_client is not installed).
 
 Caching:
-- New cache wrapper utils.cache.Cache with Redis pool support, in-memory fallback, decorators, health probe, and Prometheus hit/miss metrics.
+- Cache wrapper utils.cache.Cache auto-selects Redis or in-memory backend, provides decorators, a health probe, and Prometheus hit/miss metrics.
