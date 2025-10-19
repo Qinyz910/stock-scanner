@@ -19,6 +19,8 @@ import json
 import secrets
 from datetime import datetime, timedelta
 from jose import JWTError, jwt
+from utils import metrics
+from api_v2 import api_v2_router
 
 load_dotenv()
 
@@ -51,6 +53,16 @@ app.add_middleware(
     allow_methods=["*"],    
     allow_headers=["*"],
 )
+
+# Prometheus metrics instrumentation and endpoint
+try:
+    metrics.instrument_fastapi(app)
+    metrics.mount_metrics_endpoint(app)
+except Exception:
+    pass
+
+# Mount v2 API router (features gated within endpoints)
+app.include_router(api_v2_router)
 
 # 初始化异步服务
 us_stock_service = USStockServiceAsync()
