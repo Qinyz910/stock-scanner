@@ -184,26 +184,209 @@ docker-compose -f docker-compose.simple.yml up -d
 
 ## Quant v2 (Experimental, feature-flagged)
 
-New non-breaking modules are added under /api/v2 and are disabled by default via feature flags. Enable them in environment by setting the following to true:
-- ENABLE_FACTORS
-- ENABLE_BACKTEST
-- ENABLE_PORTFOLIO
-- ENABLE_RISK
-- ENABLE_ML
-- ENABLE_RECO
+Overview
+- v2 introduces modular quantitative research and recommendation capabilities behind feature flags. Modules: factors, backtest, portfolio, risk, ml, recommendation.
+- v1 API and UI remain unchanged and fully supported. v2 is additive and non-breaking.
 
-Endpoints (all under /api/v2):
-- GET /factors -> list available TA factors
-- POST /factors/compute -> compute SMA/EMA/RSI/MACD/ATR/BBANDS for given symbols and range
-- POST /backtest/run -> enqueue a simple long-only backtest; returns job_id
-- GET /backtest/{job_id} -> job status/result
-- GET /backtest/{job_id}/stream -> streaming progress logs
-- POST /portfolio/optimize -> lightweight equal/vol-inverse weights
-- POST /ml/predict -> baseline momentum predictor stub
-- POST /signals/recommend -> aggregate scores to rating and trade plan
+Modules and purpose
+- factors: compute classic TA factors (SMA/EMA/RSI/MACD/ATR/BBANDS) on demand.
+- backtest: run a simple long-only backtest with async job pattern and streaming logs.
+- portfolio: basic optimizers (equal weight, volatility-inverse placeholder).
+- risk: compute rolling volatility, max drawdown, mean return, Calmar ratio, risk-adjusted score (used across scoring paths).
+- ml: baseline momentum predictor stub; pluggable for custom models.
+- recommendation: aggregate per-symbol scores into ratings and simple trade plans (TP/SL/horizon) given risk appetite.
 
-Observability:
-- Prometheus metrics endpoint exposed at /metrics (API latency histograms, cache metrics, backtest durations; auto no-op if prometheus_client not installed).
+Backwards compatibility
+- All v1 endpoints remain unchanged. v2 endpoints live under /api/v2 and can be enabled per environment via feature flags.
 
-Caching:
-- New cache wrapper utils.cache.Cache with Redis pool support, in-memory fallback, decorators, health probe, and Prometheus hit/miss metrics.
+Feature flags (default: all disabled)
+- ENABLE_FACTORS=false
+- ENABLE_BACKTEST=false
+- ENABLE_PORTFOLIO=false
+- ENABLE_RISK=false
+- ENABLE_ML=false
+- ENABLE_RECO=false
+
+How to enable
+- .env file: set the flags to true (see .env.example)
+- Shell: export ENABLE_FACTORS=true ENABLE_BACKTEST=true ...
+- Docker Compose: add the flags under the app service environment.
+
+Dependencies
+- Redis (recommended): caching for factor computations and general use. If not available, the cache falls back to in-memory.
+  - Configure via environment: REDIS_URL or REDIS_HOST/REDIS_PORT/REDIS_DB. Health probe at GET /api/v2/health/cache.
+- Worker: backtests are executed asynchronously using an in-process ThreadPool (no external worker required). For heavier loads you can deploy a separate worker system (e.g., Celery or RQ) in the future; current release runs jobs within the API process with streaming progress.
+- Optional MLflow: if you operate custom ML models, you may integrate MLflow for model registry/tracking outside of this service. Not required for the baseline v2 features.
+
+Docker Compose (local with Redis)
+```
+version: '3.8'
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+  app:
+    image: qinyz/stock_scanner:latest
+    ports:
+      - "8888:8888"
+    environment:
+      - API_KEY=${API_KEY}
+      - API_URL=${API_URL}
+      - API_MODEL=${API_MODEL}
+      - API_TIMEOUT=${API_TIMEOUT}
+      - LOGIN_PASSWORD=${LOGIN_PASSWORD}
+      - ANNOUNCEMENT_TEXT=${ANNOUNCEMENT_TEXT}
+      - ENABLE_FACTORS=true
+      - ENABLE_BACKTEST=true
+      - ENABLE_PORTFOLIO=true
+      - ENABLE_RISK=true
+      - ENABLE_ML=true
+      - ENABLE_RECO=true
+      - ENABLE_CACHE=true
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+    depends_on:
+      - redis
+```
+
+Resource hints
+- Small dev box: 2 vCPU, 2 GB RAM for the app; Redis 256–512 MB. Backtests are CPU-bound; scale threads or instances for throughput.
+- Disk: ~200 MB for logs and optional snapshots; more if you enable DuckDB snapshots under data/.
+- Network: Akshare data fetches are I/O-bound; consider local mirrors in restricted environments.
+
+API usage (all under /api/v2)
+- List available factors
+```
+curl -s http://localhost:8888/api/v2/factors
+```
+
+- Compute factors
+```
+curl -s -X POST http://localhost:8888/api/v2/factors/compute \
+  -H "Content-Type: application/json" \
+  -d '{
+    "symbols": ["600519", "AAPL"],
+    "market": "A",
+    "start_date": "2023-01-01",
+    "end_date": "2023-12-31",
+    "factors": [
+      {"id": "sma", "params": {"period": 20}, "output": "last"},
+      {"id": "rsi", "params": {"period": 14}, "output": "last"},
+      {"id": "macd", "params": {"fast": 12, "slow": 26, "signal": 9}, "output": "series"}
+    ]
+  }'
+```
+
+- Run a backtest (async job pattern)
+```
+# 1) Submit job
+curl -s -X POST http://localhost:8888/api/v2/backtest/run \
+  -H "Content-Type: application/json" \
+  -d '{
+    "symbols": ["AAPL", "MSFT"],
+    "market": "US",
+    "start_date": "2023-01-01",
+    "end_date": "2023-12-31",
+    "params": {"initial_cash": 100000, "fee_bps": 1, "slippage_bps": 1}
+  }'
+# => {"job_id":"<id>"}
+
+# 2) Poll job status/result
+curl -s http://localhost:8888/api/v2/backtest/<job_id>
+
+# 3) Stream logs/progress (server-sent json lines)
+curl -s -N http://localhost:8888/api/v2/backtest/<job_id>/stream
+```
+
+- Portfolio optimize
+```
+curl -s -X POST http://localhost:8888/api/v2/portfolio/optimize \
+  -H "Content-Type: application/json" \
+  -d '{"symbols": ["AAPL","MSFT","GOOG"], "method": "equal"}'
+```
+
+- ML predict (baseline momentum)
+```
+curl -s -X POST http://localhost:8888/api/v2/ml/predict \
+  -H "Content-Type: application/json" \
+  -d '{
+    "symbols": ["AAPL","MSFT"],
+    "market": "US",
+    "start_date": "2023-01-01",
+    "end_date": "2023-12-31"
+  }'
+```
+
+- Signals recommend
+```
+curl -s -X POST http://localhost:8888/api/v2/signals/recommend \
+  -H "Content-Type: application/json" \
+  -d '{
+    "symbols": ["AAPL","MSFT"],
+    "risk_appetite": "balanced",
+    "scores": {"AAPL": 0.8, "MSFT": 0.2}
+  }'
+```
+
+Migrations
+- Default deployment uses DuckDB/CSV for optional factor snapshots and requires no database migrations.
+- If you introduce a SQL database, follow an additive-only migration policy (no breaking changes). Suggested flow:
+  - Create migrations: alembic revision -m "add <table/column>"
+  - Apply: alembic upgrade head
+  - Roll forward only; never drop or rename in-place during release.
+  - Stage first: apply migrations in staging, run smoke backtests and factor computes, then promote to prod.
+
+Security and limits
+- JWT: When LOGIN_PASSWORD is set, v1 endpoints require obtaining a bearer token from POST /api/login and sending Authorization: Bearer <token>. v2 endpoints are currently system-to-system and do not require JWT by default; protect them via network policy, ingress rules, or a reverse proxy if needed.
+- Rate limits: No built-in limiter; apply at Nginx/ingress (e.g., limit_req) or an API gateway.
+- Payload caps: Keep symbol lists small for latency (suggest <= 100). Backtests are CPU-bound; prefer <= 20 symbols per job in small instances.
+- ML guardrails: The baseline ML endpoint does not call external services. If you swap in custom models, avoid training/inferring on private data that could leak via logs or responses; scrub logs and validate prompts.
+
+Observability
+- Prometheus metrics at /metrics (enabled when prometheus_client is installed):
+  - api_latency_seconds Histogram labels: path, method, status
+  - cache_hits_total and cache_misses_total Counters
+  - backtest_job_duration_seconds Histogram
+  - process_memory_rss_bytes Gauge
+- Suggested Prometheus scrape_config
+```
+scrape_configs:
+  - job_name: stock-scanner
+    static_configs:
+      - targets: ['localhost:8888']
+    metrics_path: /metrics
+```
+
+Quickstart (local dev)
+- Install
+```
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+```
+- Start Redis (optional, recommended)
+```
+docker run -d --name redis -p 6379:6379 redis:7-alpine
+```
+- Enable v2 and run API
+```
+export ENABLE_FACTORS=true ENABLE_BACKTEST=true ENABLE_PORTFOLIO=true ENABLE_RISK=true ENABLE_ML=true ENABLE_RECO=true
+export ENABLE_CACHE=true REDIS_HOST=localhost REDIS_PORT=6379
+uvicorn web_server:app --host 0.0.0.0 --port 8888 --reload
+```
+- Try one end-to-end example
+```
+curl -s -X POST http://localhost:8888/api/v2/factors/compute \
+  -H "Content-Type: application/json" \
+  -d '{"symbols":["600519"],"market":"A","factors":[{"id":"sma","params":{"period":20}}]}'
+```
+
+OpenAPI
+- Swagger UI: http://localhost:8888/docs (look for tag "v2"). ReDoc: http://localhost:8888/redoc
+- v1 remains supported and unchanged; v2 endpoints are additive under /api/v2.
+
+Observability note
+- If prometheus_client is not installed, /metrics will return an empty payload and all metrics are no-ops.
+
+Caching note
+- utils.cache.Cache automatically uses Redis when available, with an in-memory fallback. Includes decorators, a health probe, and Prometheus hit/miss metrics.
