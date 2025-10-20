@@ -112,6 +112,18 @@ if CollectorRegistry is not None:
         ["provider", "model", "reason"],
         registry=_registry,
     )
+    AI_FALLBACK_BYTES = Counter(
+        "ai_fallback_bytes_total",
+        "Total number of bytes returned via non-stream fallback",
+        ["provider", "model"],
+        registry=_registry,
+    )
+    AI_STREAM_ZERO_THEN_FALLBACK = Counter(
+        "ai_stream_zero_then_fallback_total",
+        "Total number of times a zero-fragment stream degraded to non-stream fallback",
+        ["provider", "model"],
+        registry=_registry,
+    )
 
     # New metrics for output completeness/observability
     AI_OUTPUT_CHARS = Counter(
@@ -152,6 +164,8 @@ else:
     AI_UPSTREAM_TTFB = None
     AI_UPSTREAM_IDLE_TIMEOUTS = None
     AI_FALLBACK_NON_STREAM = None
+    AI_FALLBACK_BYTES = None
+    AI_STREAM_ZERO_THEN_FALLBACK = None
     AI_OUTPUT_CHARS = None
     AI_MISSING_SECTIONS = None
     AI_AUTOCONTINUE_CALLS = None
@@ -425,6 +439,22 @@ def record_ai_fallback_non_stream(provider: str, model: str, reason: str = "unkn
     if AI_FALLBACK_NON_STREAM is not None:
         try:
             AI_FALLBACK_NON_STREAM.labels(provider=provider or "unknown", model=model or "unknown", reason=reason or "unknown").inc()
+        except Exception:
+            pass
+
+
+def record_ai_fallback_bytes(provider: str, model: str, byte_count: int) -> None:
+    if AI_FALLBACK_BYTES is not None:
+        try:
+            AI_FALLBACK_BYTES.labels(provider=provider or "unknown", model=model or "unknown").inc(max(0, int(byte_count)))
+        except Exception:
+            pass
+
+
+def record_ai_stream_zero_then_fallback(provider: str, model: str) -> None:
+    if AI_STREAM_ZERO_THEN_FALLBACK is not None:
+        try:
+            AI_STREAM_ZERO_THEN_FALLBACK.labels(provider=provider or "unknown", model=model or "unknown").inc()
         except Exception:
             pass
 

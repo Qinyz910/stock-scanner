@@ -341,6 +341,9 @@ class AIAnalyzer:
                     ttfb_seconds = 0.0
                     sample_logged = False
 
+                    # Fallback attribution reason
+                    fallback_reason = None
+
                     # Per-call timeouts
                     timeout_stream = httpx.Timeout(read=float(getattr(self, 'SSE_IDLE_SECONDS', 8)), connect=30.0, write=30.0, pool=30.0)
 
@@ -372,6 +375,7 @@ class AIAnalyzer:
                                             metrics.record_ai_fallback_non_stream(self.PROVIDER, self.API_MODEL, reason="auth")
                                         except Exception:
                                             pass
+                                        fallback_reason = "401"
                                         limiter.release()
                                         chunk_count = 0
                                         break
@@ -386,6 +390,9 @@ class AIAnalyzer:
                                                 metrics.record_ai_rate_limit_hit(self.PROVIDER, self.API_MODEL)
                                             except Exception:
                                                 pass
+                                            fallback_reason = "429"
+                                        else:
+                                            fallback_reason = "5xx"
                                         delay = await limiter.on_transient_error(response.status_code, retry_after)
                                         try:
                                             metrics.record_ai_retry(self.PROVIDER, self.API_MODEL, reason=str(response.status_code))
@@ -398,6 +405,7 @@ class AIAnalyzer:
                                     else:
                                         limiter.release()
                                         chunk_count = 0
+                                        fallback_reason = "5xx"
                                         break
                                 else:
                                     done = False
@@ -599,6 +607,7 @@ class AIAnalyzer:
                             except Exception:
                                 pass
                             logger.warning(f"[{correlation_id}] 上游流在空闲期间超时 (idle read)")
+                            fallback_reason = "idle_timeout"
                             limiter.release()
                             attempt = max_attempts  # move to fallback
                             break
@@ -608,6 +617,7 @@ class AIAnalyzer:
                                 metrics.record_ai_retry(self.PROVIDER, self.API_MODEL, reason="network")
                             except Exception:
                                 pass
+                            fallback_reason = fallback_reason or "5xx"
                             limiter.release()
                             await asyncio.sleep(RateLimiter.compute_backoff(attempt))
                             attempt += 1
@@ -650,6 +660,10 @@ class AIAnalyzer:
                             metrics.record_ai_fallback_non_stream(self.PROVIDER, self.API_MODEL, reason="stream_zero")
                         except Exception:
                             pass
+                        # 归因：如果此前未记录具体原因，按无事件归因
+                        fallback_reason = locals().get('fallback_reason', None)
+                        if not fallback_reason:
+                            fallback_reason = "no_events"
                         concise_payload = dict(request_data)
                         concise_payload["stream"] = False
                         concise_payload["temperature"] = 0.4
@@ -657,6 +671,8 @@ class AIAnalyzer:
                         # 动态max_tokens 256->512->768
                         token_steps = [256, 512, 768]
                         analysis_text = ""
+                        usage_obj = None
+                        finish_r = None
                         for mt in token_steps:
                             concise_payload["max_tokens"] = min(mt, self.API_MAX_TOKENS)
                             # 附加简洁说明
@@ -670,11 +686,19 @@ class AIAnalyzer:
                             await limiter.wait_for_slot()
                             try:
                                 resp = await client.post(api_url, json=concise_payload, headers=headers_json)
+                                # 记录响应头与首512B（采样）
+                                try:
+                                    logger.debug(f"[{correlation_id}] 非流式补救响应头: {dict(resp.headers)}")
+                                    body_peek = resp.text[:512]
+                                    logger.debug(f"[{correlation_id}] 非流式补救响应样本: {str(body_peek)[:512]}")
+                                except Exception:
+                                    pass
                                 if resp.status_code == 200:
                                     resp_data = resp.json()
                                     choices_list = resp_data.get("choices", [])
                                     if isinstance(choices_list, list) and len(choices_list) > 0:
                                         first_choice = choices_list[0] or {}
+                                        finish_r = first_choice.get("finish_reason") or resp_data.get("finish_reason")
                                         message = first_choice.get("message", {})
                                         if isinstance(message, dict) and message:
                                             analysis_text = message.get("content", "") or ""
@@ -682,11 +706,33 @@ class AIAnalyzer:
                                             analysis_text = first_choice.get("text", "") or ""
                                     else:
                                         analysis_text = resp_data.get("content", "") or resp_data.get("text", "") or ""
+                                        finish_r = resp_data.get("finish_reason")
+                                    usage_obj = resp_data.get("usage")
                                     await limiter.on_success()
                                     limiter.release()
                                     if analysis_text:
                                         break
-                                elif resp.status_code in (429, 500, 502, 503, 504):
+                                elif resp.status_code in (401, 403):
+                                    fallback_reason = "401"
+                                    analysis_text = f"AI服务未授权或密钥无效(HTTP {resp.status_code})，请检查API Key或权限。"
+                                    limiter.release()
+                                    break
+                                elif resp.status_code == 429:
+                                    try:
+                                        metrics.record_ai_rate_limit_hit(self.PROVIDER, self.API_MODEL)
+                                    except Exception:
+                                        pass
+                                    fallback_reason = "429"
+                                    delay = await limiter.on_transient_error(resp.status_code, resp.headers.get("Retry-After") if hasattr(resp, "headers") else None)
+                                    try:
+                                        metrics.record_ai_retry(self.PROVIDER, self.API_MODEL, reason=str(resp.status_code))
+                                    except Exception:
+                                        pass
+                                    limiter.release()
+                                    await asyncio.sleep(delay)
+                                    continue
+                                elif resp.status_code in (500, 502, 503, 504):
+                                    fallback_reason = "5xx"
                                     delay = await limiter.on_transient_error(resp.status_code, resp.headers.get("Retry-After") if hasattr(resp, "headers") else None)
                                     try:
                                         metrics.record_ai_retry(self.PROVIDER, self.API_MODEL, reason=str(resp.status_code))
@@ -708,14 +754,21 @@ class AIAnalyzer:
                                 await asyncio.sleep(0.25)
                                 continue
                         if analysis_text:
-                            # 以统一chunker回放
-                            for c in self._chunk_text(analysis_text):
-                                chunks_sent += 1
-                                yield json.dumps({
-                                    "stock_code": stock_code,
-                                    "ai_analysis_chunk": c,
-                                    "status": "analyzing"
-                                })
+                            # 作为最终AI片段一次性输出（ai_full）
+                            try:
+                                metrics.record_ai_stream_zero_then_fallback(self.PROVIDER, self.API_MODEL)
+                                metrics.record_ai_fallback_bytes(self.PROVIDER, self.API_MODEL, len(analysis_text.encode('utf-8')))
+                            except Exception:
+                                pass
+                            yield json.dumps({
+                                "stock_code": stock_code,
+                                "event": "ai_full",
+                                "content": analysis_text,
+                                "status": "analyzing",
+                                "fallback_reason": fallback_reason,
+                                "finish_reason": finish_r,
+                                "usage": usage_obj,
+                            })
                             try:
                                 self.cache.set(cache_key, {"analysis_text": analysis_text}, ttl_seconds=self.cache_ttl)
                             except Exception:
@@ -723,15 +776,30 @@ class AIAnalyzer:
                             full_content = analysis_text
                             outcome = "fallback"
                         else:
-                            note = generate_placeholder(stock_code, technical_summary)
+                            # 针对不同状态码生成友好文案
+                            if fallback_reason == "401":
+                                note = f"AI服务未授权或密钥无效(401/403)，请检查API Key或权限。"
+                            elif fallback_reason == "429":
+                                note = "上游API限速/配额受限，暂无法提供完整AI分析，请稍后重试。"
+                            elif fallback_reason == "5xx":
+                                note = "上游AI服务暂时不可用(5xx)，建议稍后重试。"
+                            elif fallback_reason == "idle_timeout":
+                                note = "上游流连接空闲超时，正在进行降级处理。"
+                            elif fallback_reason == "no_events":
+                                note = "上游未返回任何流式内容，已进行降级处理。"
+                            else:
+                                note = generate_placeholder(stock_code, technical_summary)
                             try:
                                 metrics.record_ai_fallback(self.PROVIDER, self.API_MODEL, reason="placeholder")
                             except Exception:
                                 pass
                             yield json.dumps({
                                 "stock_code": stock_code,
-                                "ai_analysis_chunk": note,
-                                "status": "analyzing"
+                                "event": "ai_full",
+                                "content": note,
+                                "status": "analyzing",
+                                "fallback_reason": fallback_reason or "degraded",
+                                "finish_reason": "degraded"
                             })
                             full_content = note
                             chunks_sent += 1
@@ -782,6 +850,7 @@ class AIAnalyzer:
                         "sections_missing": missing_sections,
                         "sections_ok": len(missing_sections) == 0,
                         "finish_reason": saw_finish_reason or outcome,
+                        "fallback_reason": fallback_reason,
                         "chunks_sent": chunks_sent
                     })
                     try:
