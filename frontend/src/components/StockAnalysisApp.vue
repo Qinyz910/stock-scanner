@@ -667,12 +667,32 @@ function applyStreamUpdate(data: StreamAnalysisUpdate) {
       stock.analysis = data.analysis;
     }
     
-    // 处理AI分析片段
+    // 统一处理AI事件：ai_delta / ai_full
+    if (typeof data.event === 'string') {
+      if (data.event === 'ai_delta' && typeof data.delta === 'string') {
+        stock.analysis = (stock.analysis || '') + data.delta;
+        stock.analysisStatus = 'analyzing';
+      } else if (data.event === 'ai_full' && typeof data.content === 'string') {
+        stock.analysis = data.content;
+        // 如果后端标记了降级原因，保存以便UI展示
+        if (typeof (data as any).fallback_reason === 'string') {
+          (stock as any).fallback_reason = (data as any).fallback_reason as string;
+        }
+        stock.analysisStatus = data.status || 'analyzing';
+      }
+    }
+
+    // 兼容旧字段：ai_analysis_chunk 作为增量
     if (data.ai_analysis_chunk !== undefined) {
       stock.analysis = (stock.analysis || '') + data.ai_analysis_chunk;
       stock.analysisStatus = 'analyzing';
     }
-    
+
+    // 如果后端在其他消息中提供了fallback_reason，也保存
+    if ((data as any).fallback_reason !== undefined) {
+      (stock as any).fallback_reason = (data as any).fallback_reason as any;
+    }
+
     // 如果有错误，则更新
     if (data.error !== undefined) {
       stock.error = data.error;

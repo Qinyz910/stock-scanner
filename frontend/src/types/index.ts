@@ -41,6 +41,8 @@ export interface StockInfo {
   risk_adjusted_score?: number;
   confidence?: number;
   risk_tag?: 'low' | 'medium' | 'high' | string;
+  // AI降级原因（当发生fallback时由后端提供）
+  fallback_reason?: 'idle_timeout' | 'no_events' | '429' | '401' | '5xx' | string;
 }
 
 export interface SearchResult {
@@ -112,6 +114,13 @@ export interface StreamAnalysisUpdate {
   volume_status?: string;
   analysis_date?: string;
   ai_analysis_chunk?: string;
+  // 统一AI事件（增量/完整）
+  event?: 'ai_delta' | 'ai_full';
+  delta?: string;
+  content?: string;
+  fallback_reason?: 'idle_timeout' | 'no_events' | '429' | '401' | '5xx' | string;
+  finish_reason?: string;
+  usage?: unknown;
   risk_adjusted_score?: number;
   confidence?: number;
   risk_tag?: 'low' | 'medium' | 'high' | string;

@@ -72,7 +72,7 @@
       </div>
     </div>
     
-    <div class="analysis-date" v-if="stock.analysis_date || stock.risk_tag || stock.confidence !== undefined">
+    <div class="analysis-date" v-if="stock.analysis_date || stock.risk_tag || stock.confidence !== undefined || stock.fallback_reason">
       <n-space align="center" :wrap="false">
         <n-tag v-if="stock.analysis_date" type="info" size="small">
           <template #icon>
@@ -85,6 +85,9 @@
         </n-tag>
         <n-tag v-if="isLowConfidence" type="warning" size="small" round>
           低置信度
+        </n-tag>
+        <n-tag v-if="stock.fallback_reason" :type="fallbackReasonTagType" size="small" round>
+          AI降级: {{ fallbackReasonText }}
         </n-tag>
       </n-space>
     </div>
@@ -357,6 +360,34 @@ const riskTagText = computed(() => {
 
 const isLowConfidence = computed(() => {
   return typeof props.stock.confidence === 'number' && props.stock.confidence < 0.4;
+});
+
+// 显示AI降级原因的小标签
+const fallbackReasonText = computed(() => {
+  const reason = (props.stock as any).fallback_reason as string | undefined;
+  switch (reason) {
+    case 'idle_timeout':
+      return '空闲超时';
+    case 'no_events':
+      return '无流事件';
+    case '429':
+      return '限速/配额';
+    case '401':
+      return '未授权';
+    case '5xx':
+      return '上游故障';
+    default:
+      return reason || '';
+  }
+});
+const fallbackReasonTagType = computed(() => {
+  const reason = (props.stock as any).fallback_reason as string | undefined;
+  if (!reason) return 'default';
+  if (reason === '401') return 'warning';
+  if (reason === '429') return 'warning';
+  if (reason === '5xx') return 'error';
+  if (reason === 'idle_timeout' || reason === 'no_events') return 'info';
+  return 'default';
 });
 
 const message = useMessage();
