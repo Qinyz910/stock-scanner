@@ -255,7 +255,8 @@ class AIAnalyzer:
             # 准备请求头
             headers_base = {
                 "Content-Type": "application/json",
-                "Authorization": f"Bearer {self.API_KEY}"
+                "Authorization": f"Bearer {self.API_KEY}",
+                "User-Agent": f"stock-scanner/1.0 (+https://github.com/) model/{self.API_MODEL} provider/{self.PROVIDER}",
             }
             headers_stream = dict(headers_base)
             headers_stream.update({
@@ -409,7 +410,18 @@ class AIAnalyzer:
                                         break
                                 else:
                                     done = False
+                                    total_timeout_hit = False
                                     async for chunk in response.aiter_text():
+                                        # End-to-end total time budget check
+                                        try:
+                                            if float(getattr(self, 'SSE_TOTAL_SECONDS', 0)) > 0 and (time.perf_counter() - start_time) > float(getattr(self, 'SSE_TOTAL_SECONDS', 0)):
+                                                logger.warning(f"[{correlation_id}] 达到端到端超时预算，停止流并尝试降级")
+                                                fallback_reason = fallback_reason or "idle_timeout"
+                                                total_timeout_hit = True
+                                                done = True
+                                                break
+                                        except Exception:
+                                            pass
                                         if not chunk:
                                             continue
                                         sse_line_buffer += chunk
@@ -686,11 +698,11 @@ class AIAnalyzer:
                             await limiter.wait_for_slot()
                             try:
                                 resp = await client.post(api_url, json=concise_payload, headers=headers_json)
-                                # 记录响应头与首512B（采样）
+                                # 记录响应头与首256B（采样）
                                 try:
                                     logger.debug(f"[{correlation_id}] 非流式补救响应头: {dict(resp.headers)}")
-                                    body_peek = resp.text[:512]
-                                    logger.debug(f"[{correlation_id}] 非流式补救响应样本: {str(body_peek)[:512]}")
+                                    body_peek = resp.text[:256]
+                                    logger.debug(f"[{correlation_id}] 非流式补救响应样本: {str(body_peek)[:256]}")
                                 except Exception:
                                     pass
                                 if resp.status_code == 200:
@@ -758,6 +770,7 @@ class AIAnalyzer:
                             try:
                                 metrics.record_ai_stream_zero_then_fallback(self.PROVIDER, self.API_MODEL)
                                 metrics.record_ai_fallback_bytes(self.PROVIDER, self.API_MODEL, len(analysis_text.encode('utf-8')))
+                                metrics.record_ai_fallback_success(self.PROVIDER, self.API_MODEL, reason=fallback_reason or "unknown")
                             except Exception:
                                 pass
                             yield json.dumps({
@@ -791,6 +804,7 @@ class AIAnalyzer:
                                 note = generate_placeholder(stock_code, technical_summary)
                             try:
                                 metrics.record_ai_fallback(self.PROVIDER, self.API_MODEL, reason="placeholder")
+                                metrics.record_ai_fallback_fail(self.PROVIDER, self.API_MODEL, reason=fallback_reason or "unknown")
                             except Exception:
                                 pass
                             yield json.dumps({
