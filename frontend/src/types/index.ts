@@ -41,6 +41,8 @@ export interface StockInfo {
   risk_adjusted_score?: number;
   confidence?: number;
   risk_tag?: 'low' | 'medium' | 'high' | string;
+  // 备用/降级原因（新字段，兼容后端可能提供的旧 fallback_reason）
+  fallbackReason?: 'rate_limited' | 'timeout' | 'no_context' | 'empty_stream' | 'other';
   // AI流式提供商元数据
   ai_provider?: string;
   ai_model?: string;

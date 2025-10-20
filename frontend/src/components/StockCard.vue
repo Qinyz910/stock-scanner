@@ -72,7 +72,7 @@
       </div>
     </div>
     
-    <div class="analysis-date" v-if="stock.analysis_date || stock.risk_tag || stock.confidence !== undefined || stock.ai_provider || stock.ai_model">
+    <div class="analysis-date" v-if="stock.analysis_date || stock.risk_tag || stock.confidence !== undefined || stock.ai_provider || stock.ai_model || fallbackReasonText">
       <n-space align="center" :wrap="false">
         <n-tag v-if="stock.analysis_date" type="info" size="small">
           <template #icon>
@@ -88,6 +88,9 @@
         </n-tag>
         <n-tag v-if="(stock as any).provider_switch_count" type="success" size="small" round>
           已切换至 {{ (stock as any).ai_provider || '备用提供商' }}<span v-if="(stock as any).ai_model"> / {{ (stock as any).ai_model }}</span>
+        </n-tag>
+        <n-tag v-if="fallbackReasonText" :type="fallbackReasonTagType" size="small" round>
+          {{ fallbackReasonText }}
         </n-tag>
       </n-space>
     </div>
@@ -364,8 +367,32 @@ const isLowConfidence = computed(() => {
 
 // 显示AI降级原因的小标签
 const fallbackReasonText = computed(() => {
-  const reason = (props.stock as any).fallback_reason as string | undefined;
-  switch (reason) {
+  const legacy = (props.stock as any).fallback_reason as string | undefined;
+  const modern = (props.stock as any).fallbackReason as
+    | 'rate_limited'
+    | 'timeout'
+    | 'no_context'
+    | 'empty_stream'
+    | 'other'
+    | undefined;
+
+  if (modern) {
+    switch (modern) {
+      case 'rate_limited':
+        return '限速/配额';
+      case 'timeout':
+        return '请求超时';
+      case 'no_context':
+        return '无上下文';
+      case 'empty_stream':
+        return '无流事件';
+      case 'other':
+      default:
+        return '服务降级';
+    }
+  }
+
+  switch (legacy) {
     case 'idle_timeout':
       return '空闲超时';
     case 'no_events':
@@ -377,16 +404,30 @@ const fallbackReasonText = computed(() => {
     case '5xx':
       return '上游故障';
     default:
-      return reason || '';
+      return legacy || '';
   }
 });
 const fallbackReasonTagType = computed(() => {
-  const reason = (props.stock as any).fallback_reason as string | undefined;
-  if (!reason) return 'default';
-  if (reason === '401') return 'warning';
-  if (reason === '429') return 'warning';
-  if (reason === '5xx') return 'error';
-  if (reason === 'idle_timeout' || reason === 'no_events') return 'info';
+  const legacy = (props.stock as any).fallback_reason as string | undefined;
+  const modern = (props.stock as any).fallbackReason as
+    | 'rate_limited'
+    | 'timeout'
+    | 'no_context'
+    | 'empty_stream'
+    | 'other'
+    | undefined;
+
+  if (modern) {
+    if (modern === 'rate_limited' || modern === 'timeout') return 'warning';
+    if (modern === 'no_context' || modern === 'empty_stream') return 'info';
+    return 'default';
+  }
+
+  if (!legacy) return 'default';
+  if (legacy === '401') return 'warning';
+  if (legacy === '429') return 'warning';
+  if (legacy === '5xx') return 'error';
+  if (legacy === 'idle_timeout' || legacy === 'no_events') return 'info';
   return 'default';
 });
 
