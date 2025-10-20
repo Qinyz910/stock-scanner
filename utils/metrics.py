@@ -192,3 +192,109 @@ def observe_ai_stream_duration(seconds: float, model: str = "unknown", outcome: 
             AI_STREAM_DURATION.labels(model=model or "unknown", outcome=outcome).observe(max(0.0, float(seconds)))
         except Exception:
             pass
+
+
+# ---- Additional AI rate limit/ retry/ concurrency metrics ----
+if CollectorRegistry is not None:
+    try:
+        AI_RATE_LIMIT_HITS = Counter(
+            "ai_rate_limit_hits_total",
+            "Total number of AI 429 rate limit hits",
+            ["provider", "model"],
+            registry=_registry,
+        )
+        AI_RETRIES = Counter(
+            "ai_retries_total",
+            "Total number of AI request retries",
+            ["provider", "model", "reason"],
+            registry=_registry,
+        )
+        AI_CIRCUIT_OPEN = Counter(
+            "ai_circuit_open_total",
+            "Total number of times AI circuit breaker opened",
+            ["provider", "model"],
+            registry=_registry,
+        )
+        AI_REQUEST_CONCURRENCY = Gauge(
+            "ai_request_concurrency",
+            "Current AI request concurrency per provider/model",
+            ["provider", "model"],
+            registry=_registry,
+        )
+        AI_FALLBACK_USED = Counter(
+            "ai_fallback_used_total",
+            "Total number of times AI fallback was used",
+            ["provider", "model", "reason"],
+            registry=_registry,
+        )
+        AI_ZERO_CHUNKS = Counter(
+            "ai_zero_chunks_total",
+            "Total number of AI stream zero-chunk occurrences",
+            ["provider", "model", "reason"],
+            registry=_registry,
+        )
+    except Exception:
+        AI_RATE_LIMIT_HITS = None
+        AI_RETRIES = None
+        AI_CIRCUIT_OPEN = None
+        AI_REQUEST_CONCURRENCY = None
+        AI_FALLBACK_USED = None
+        AI_ZERO_CHUNKS = None
+else:
+    AI_RATE_LIMIT_HITS = None
+    AI_RETRIES = None
+    AI_CIRCUIT_OPEN = None
+    AI_REQUEST_CONCURRENCY = None
+    AI_FALLBACK_USED = None
+    AI_ZERO_CHUNKS = None
+
+
+def record_ai_rate_limit_hit(provider: str, model: str) -> None:
+    if AI_RATE_LIMIT_HITS is not None:
+        try:
+            AI_RATE_LIMIT_HITS.labels(provider=provider or "unknown", model=model or "unknown").inc()
+        except Exception:
+            pass
+
+
+def record_ai_retry(provider: str, model: str, reason: str = "unknown") -> None:
+    if AI_RETRIES is not None:
+        try:
+            AI_RETRIES.labels(provider=provider or "unknown", model=model or "unknown", reason=reason).inc()
+        except Exception:
+            pass
+
+
+def record_ai_circuit_open(provider: str, model: str) -> None:
+    if AI_CIRCUIT_OPEN is not None:
+        try:
+            AI_CIRCUIT_OPEN.labels(provider=provider or "unknown", model=model or "unknown").inc()
+        except Exception:
+            pass
+
+
+def set_ai_request_concurrency(provider: str, model: str, value: int) -> None:
+    if AI_REQUEST_CONCURRENCY is not None:
+        try:
+            if value == -1:
+                # getter path will set actual value
+                return
+            AI_REQUEST_CONCURRENCY.labels(provider=provider or "unknown", model=model or "unknown").set(max(0, int(value)))
+        except Exception:
+            pass
+
+
+def record_ai_fallback(provider: str, model: str, reason: str = "unknown") -> None:
+    if AI_FALLBACK_USED is not None:
+        try:
+            AI_FALLBACK_USED.labels(provider=provider or "unknown", model=model or "unknown", reason=reason).inc()
+        except Exception:
+            pass
+
+
+def record_ai_zero_chunks(provider: str, model: str, reason: str = "unknown") -> None:
+    if AI_ZERO_CHUNKS is not None:
+        try:
+            AI_ZERO_CHUNKS.labels(provider=provider or "unknown", model=model or "unknown", reason=reason).inc()
+        except Exception:
+            pass

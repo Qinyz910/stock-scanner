@@ -240,6 +240,9 @@ class StockAnalyzerService:
         """
         try:
             logger.info(f"开始批量扫描 {len(stock_codes)} 只股票, 市场: {market_type}")
+
+            # 任务级去重，避免重复请求
+            stock_codes = list(dict.fromkeys(stock_codes))
             
             # 输出初始状态 - 发送批量分析初始化消息
             yield json.dumps({
@@ -345,8 +348,15 @@ class StockAnalyzerService:
             if stream and filtered_results:
                 # 只分析前5只评分最高的股票，避免分析过多导致前端卡顿
                 top_stocks = filtered_results[:5]
+
+                # 启动节流：每秒最多N个启动，并引入抖动，避免雪崩
+                import os, random, asyncio as _asyncio
+                starts_per_sec = max(1, int(os.getenv("AI_ANALYSIS_STARTS_PER_SEC", "2")))
+                base_delay = 1.0 / float(starts_per_sec)
                 
                 for stock_code, score, _ in top_stocks:
+                    # 抖动延时，避免同一时刻集中请求
+                    await _asyncio.sleep(base_delay + random.uniform(0.05, 0.25))
                     df = stock_with_indicators.get(stock_code)
                     if df is not None:
                         # 输出正在分析的股票信息
