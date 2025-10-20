@@ -162,6 +162,26 @@ if CollectorRegistry is not None:
         ["provider", "model", "reason"],
         registry=_registry,
     )
+
+    # Provider switch metrics
+    AI_PROVIDER_SWITCH = Counter(
+        "ai_provider_switch_total",
+        "Total number of times AI provider switch was triggered during streaming",
+        ["from_provider", "from_model", "to_provider", "to_model", "reason"],
+        registry=_registry,
+    )
+    AI_PROVIDER_SWITCH_SUCCESS = Counter(
+        "ai_provider_switch_success_total",
+        "Total number of successful provider switches (stream continued)",
+        ["to_provider", "to_model"],
+        registry=_registry,
+    )
+    AI_PROVIDER_SWITCH_FAILED = Counter(
+        "ai_provider_switch_failed_total",
+        "Total number of failed provider switches (still no stream)",
+        ["to_provider", "to_model", "reason"],
+        registry=_registry,
+    )
 else:
     API_LATENCY = None
     CACHE_HITS = None
@@ -184,6 +204,9 @@ else:
     AI_MISSING_SECTIONS = None
     AI_AUTOCONTINUE_CALLS = None
     AI_TRUNCATED_RESPONSES = None
+    AI_PROVIDER_SWITCH = None
+    AI_PROVIDER_SWITCH_SUCCESS = None
+    AI_PROVIDER_SWITCH_FAILED = None
 
 
 def instrument_fastapi(app: FastAPI) -> None:
@@ -501,5 +524,35 @@ def record_ai_stream_empty(provider: str, model: str) -> None:
     if AI_STREAM_EMPTY is not None:
         try:
             AI_STREAM_EMPTY.labels(provider=provider or "unknown", model=model or "unknown").inc()
+        except Exception:
+            pass
+
+
+def record_ai_provider_switch(from_provider: str, from_model: str, to_provider: str, to_model: str, reason: str) -> None:
+    if 'AI_PROVIDER_SWITCH' in globals() and AI_PROVIDER_SWITCH is not None:
+        try:
+            AI_PROVIDER_SWITCH.labels(
+                from_provider=from_provider or "unknown",
+                from_model=from_model or "unknown",
+                to_provider=to_provider or "unknown",
+                to_model=to_model or "unknown",
+                reason=reason or "unknown",
+            ).inc()
+        except Exception:
+            pass
+
+
+def record_ai_provider_switch_success(to_provider: str, to_model: str) -> None:
+    if 'AI_PROVIDER_SWITCH_SUCCESS' in globals() and AI_PROVIDER_SWITCH_SUCCESS is not None:
+        try:
+            AI_PROVIDER_SWITCH_SUCCESS.labels(to_provider=to_provider or "unknown", to_model=to_model or "unknown").inc()
+        except Exception:
+            pass
+
+
+def record_ai_provider_switch_failed(to_provider: str, to_model: str, reason: str) -> None:
+    if 'AI_PROVIDER_SWITCH_FAILED' in globals() and AI_PROVIDER_SWITCH_FAILED is not None:
+        try:
+            AI_PROVIDER_SWITCH_FAILED.labels(to_provider=to_provider or "unknown", to_model=to_model or "unknown", reason=reason or "unknown").inc()
         except Exception:
             pass
