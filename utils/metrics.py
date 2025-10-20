@@ -76,6 +76,32 @@ if CollectorRegistry is not None:
         registry=_registry,
         buckets=(0.1, 0.25, 0.5, 1, 2, 5, 10, 20, 30, 60)
     )
+
+    # New metrics for output completeness/observability
+    AI_OUTPUT_CHARS = Counter(
+        "ai_output_chars_total",
+        "Total number of characters produced by AI outputs",
+        ["provider", "model"],
+        registry=_registry,
+    )
+    AI_MISSING_SECTIONS = Counter(
+        "ai_missing_sections_total",
+        "Total count of missing required sections detected",
+        ["provider", "model", "section"],
+        registry=_registry,
+    )
+    AI_AUTOCONTINUE_CALLS = Counter(
+        "ai_autocontinue_calls_total",
+        "Total number of auto-continue completion calls made",
+        ["provider", "model"],
+        registry=_registry,
+    )
+    AI_TRUNCATED_RESPONSES = Counter(
+        "ai_truncated_responses_total",
+        "Total number of truncated/short AI responses detected",
+        ["provider", "model", "reason"],
+        registry=_registry,
+    )
 else:
     API_LATENCY = None
     CACHE_HITS = None
@@ -85,6 +111,10 @@ else:
     AI_STREAM_ZERO_CHUNKS = None
     AI_STREAM_FALLBACK = None
     AI_STREAM_DURATION = None
+    AI_OUTPUT_CHARS = None
+    AI_MISSING_SECTIONS = None
+    AI_AUTOCONTINUE_CALLS = None
+    AI_TRUNCATED_RESPONSES = None
 
 
 def instrument_fastapi(app: FastAPI) -> None:
@@ -296,5 +326,39 @@ def record_ai_zero_chunks(provider: str, model: str, reason: str = "unknown") ->
     if AI_ZERO_CHUNKS is not None:
         try:
             AI_ZERO_CHUNKS.labels(provider=provider or "unknown", model=model or "unknown", reason=reason).inc()
+        except Exception:
+            pass
+
+
+# ---- Output completeness metrics helpers ----
+
+def record_ai_output_chars(provider: str, model: str, chars: int) -> None:
+    if AI_OUTPUT_CHARS is not None:
+        try:
+            AI_OUTPUT_CHARS.labels(provider=provider or "unknown", model=model or "unknown").inc(max(0, int(chars)))
+        except Exception:
+            pass
+
+
+def record_ai_missing_section(provider: str, model: str, section: str) -> None:
+    if AI_MISSING_SECTIONS is not None:
+        try:
+            AI_MISSING_SECTIONS.labels(provider=provider or "unknown", model=model or "unknown", section=section or "unknown").inc()
+        except Exception:
+            pass
+
+
+def record_ai_autocontinue_call(provider: str, model: str) -> None:
+    if AI_AUTOCONTINUE_CALLS is not None:
+        try:
+            AI_AUTOCONTINUE_CALLS.labels(provider=provider or "unknown", model=model or "unknown").inc()
+        except Exception:
+            pass
+
+
+def record_ai_truncated_response(provider: str, model: str, reason: str = "unknown") -> None:
+    if AI_TRUNCATED_RESPONSES is not None:
+        try:
+            AI_TRUNCATED_RESPONSES.labels(provider=provider or "unknown", model=model or "unknown", reason=reason or "unknown").inc()
         except Exception:
             pass

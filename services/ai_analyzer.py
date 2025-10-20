@@ -35,16 +35,17 @@ def generate_placeholder(stock_code: str, technical_summary: dict) -> str:
     except Exception:
         return f"{stock_code} 占位分析：当前AI服务暂不可用，请稍后重试。"
 
+
 class AIAnalyzer:
     """
     异步AI分析服务
     负责调用AI API对股票数据进行分析
     """
-    
+
     def __init__(self, custom_api_url=None, custom_api_key=None, custom_api_model=None, custom_api_timeout=None):
         """
         初始化AI分析服务
-        
+
         Args:
             custom_api_url: 自定义API URL
             custom_api_key: 自定义API密钥
@@ -53,7 +54,7 @@ class AIAnalyzer:
         """
         # 加载环境变量
         load_dotenv()
-        
+
         # 设置API配置
         self.API_URL = custom_api_url or os.getenv('API_URL')
         self.API_KEY = custom_api_key or os.getenv('API_KEY')
@@ -72,25 +73,34 @@ class AIAnalyzer:
         self.cache_ttl = int(os.getenv("AI_CACHE_TTL", "1200"))
         self.cache = Cache(namespace=f"ai_results_{self.API_MODEL}")
 
-        logger.debug(f"初始化AIAnalyzer: PROVIDER={self.PROVIDER}, API_URL={self.API_URL}, API_MODEL={self.API_MODEL}, API_KEY={'已提供' if self.API_KEY else '未提供'}, API_TIMEOUT={self.API_TIMEOUT}")
-    
+        # 输出完整性与分块参数
+        self.MIN_OUTPUT_CHARS = int(os.getenv("AI_MIN_OUTPUT_CHARS", "600"))
+        self.CHUNK_MAX_BYTES = int(os.getenv("AI_CHUNK_MAX_BYTES", "3072"))
+        self.CHUNK_MIN_SENTENCES = int(os.getenv("AI_CHUNK_MIN_SENTENCES", "2"))
+        self.REQUIRED_SECTIONS = ["概览", "主要信号", "技术面", "基本面", "风险", "操作建议"]
+
+        logger.debug(
+            f"初始化AIAnalyzer: PROVIDER={self.PROVIDER}, API_URL={self.API_URL}, API_MODEL={self.API_MODEL}, API_KEY={'已提供' if self.API_KEY else '未提供'}, API_TIMEOUT={self.API_TIMEOUT}, "
+            f"MIN_CHARS={self.MIN_OUTPUT_CHARS}, CHUNK_MAX_BYTES={self.CHUNK_MAX_BYTES}, CHUNK_MIN_SENTENCES={self.CHUNK_MIN_SENTENCES}"
+        )
+
     async def get_ai_analysis(self, df: pd.DataFrame, stock_code: str, market_type: str = 'A', stream: bool = False) -> AsyncGenerator[str, None]:
         """
         对股票数据进行AI分析
-        
+
         Args:
             df: 包含技术指标的DataFrame
             stock_code: 股票代码
             market_type: 市场类型，默认为'A'股
             stream: 是否使用流式响应
-            
+
         Returns:
             异步生成器，生成分析结果字符串
         """
         try:
             start_time = time.perf_counter()
             logger.info(f"开始AI分析 {stock_code}, 流式模式: {stream}")
-            
+
             # 提取关键技术指标
             if df is None or df.empty:
                 msg = "暂无可用分析素材(no_data)"
@@ -109,36 +119,33 @@ class AIAnalyzer:
                     pass
                 return
             latest_data = df.iloc[-1]
-            
+
             # 计算技术指标
             rsi = latest_data.get('RSI')
             price = latest_data.get('Close')
             price_change = latest_data.get('Change')
-            
+
             # 确定MA趋势
             ma_trend = 'UP' if latest_data.get('MA5', 0) > latest_data.get('MA20', 0) else 'DOWN'
-            
+
             # 确定MACD信号
             macd = latest_data.get('MACD', 0)
             macd_signal = latest_data.get('MACD_Signal', 0)
             macd_signal_type = 'BUY' if macd > macd_signal else 'SELL'
-            
+
             # 确定成交量状态
             volume_ratio = latest_data.get('Volume_Ratio', 1)
             volume_status = 'HIGH' if volume_ratio > 1.5 else ('LOW' if volume_ratio < 0.5 else 'NORMAL')
-            
+
             # AI 分析内容
-            # 最近14天的股票数据记录
             recent_data = df.tail(14).to_dict('records')
-            
-            # 包含trend, volatility, volume_trend, rsi_level的字典
             technical_summary = {
                 'trend': 'upward' if df.iloc[-1]['MA5'] > df.iloc[-1]['MA20'] else 'downward',
                 'volatility': f"{df.iloc[-1]['Volatility']:.2f}%",
                 'volume_trend': 'increasing' if df.iloc[-1]['Volume_Ratio'] > 1 else 'decreasing',
                 'rsi_level': df.iloc[-1]['RSI']
             }
-            
+
             # 根据市场类型调整分析提示
             if market_type in ['ETF', 'LOF']:
                 prompt = f"""
@@ -220,10 +227,10 @@ class AIAnalyzer:
                 
                 请基于技术指标和A股市场特点进行分析，给出具体数据支持。
                 """
-            
+
             # 格式化API URL
             api_url = APIUtils.format_api_url(self.API_URL)
-            
+
             # 准备请求数据（禁用工具调用，控制生成，避免空输出）
             request_data = {
                 "model": self.API_MODEL,
@@ -234,13 +241,13 @@ class AIAnalyzer:
                 "tool_choice": "none",
                 "stream": stream
             }
-            
+
             # 准备请求头
             headers = {
                 "Content-Type": "application/json",
                 "Authorization": f"Bearer {self.API_KEY}"
             }
-            
+
             # 获取当前日期作为分析日期
             analysis_date = datetime.now().strftime("%Y-%m-%d")
 
@@ -280,7 +287,6 @@ class AIAnalyzer:
             # 异步请求API
             timeout = httpx.Timeout(read=self.API_TIMEOUT, connect=30.0, write=self.API_TIMEOUT, pool=self.API_TIMEOUT)
             async with httpx.AsyncClient(timeout=timeout) as client:
-                # 记录请求
                 logger.debug(f"[{correlation_id}] 发送AI请求: URL={api_url}, MODEL={self.API_MODEL}, STREAM={stream}")
 
                 # 先发送技术指标数据
@@ -297,13 +303,14 @@ class AIAnalyzer:
                 })
 
                 if stream:
-                    # 流式响应处理（带限流与重试）
                     first_chunk_snapshot = None
                     last_chunk_snapshot = None
                     chunk_count = 0
+                    chunks_sent = 0
                     buffer = ""
+                    pending = ""
+                    saw_finish_reason = None
 
-                    # 尝试建立流连接，失败则指数退避（最多3次）
                     max_attempts = 3
                     attempt = 0
                     while attempt < max_attempts:
@@ -318,7 +325,6 @@ class AIAnalyzer:
                                     except Exception:
                                         error_message = f"HTTP {response.status_code}"
                                     logger.error(f"[{correlation_id}] AI 流式请求失败: {response.status_code} - {error_message}")
-                                    # 429/5xx触发重试
                                     if response.status_code in (429, 500, 502, 503, 504):
                                         retry_after = None
                                         try:
@@ -339,7 +345,6 @@ class AIAnalyzer:
                                         chunk_count = 0
                                         break
                                 else:
-                                    # 读取流式内容
                                     async for chunk in response.aiter_text():
                                         if not chunk:
                                             continue
@@ -354,7 +359,6 @@ class AIAnalyzer:
                                                 logger.debug(f"[{correlation_id}] 收到流结束标记 [DONE]")
                                                 continue
                                             try:
-                                                # 检查是否为错误JSON行
                                                 if "error" in line.lower() and line.strip().startswith('{'):
                                                     try:
                                                         _err = json.loads(line)
@@ -366,16 +370,14 @@ class AIAnalyzer:
                                                 chunk_data = json.loads(line)
                                                 choices_list = chunk_data.get("choices", [])
                                                 if not isinstance(choices_list, list) or len(choices_list) == 0:
-                                                    logger.debug("流式响应中choices为空或格式异常，跳过该块")
                                                     continue
                                                 first_choice = choices_list[0] or {}
                                                 finish_reason = first_choice.get("finish_reason")
                                                 if finish_reason in ("stop", "length"):
-                                                    logger.debug(f"[{correlation_id}] 收到finish_reason={finish_reason}")
+                                                    saw_finish_reason = finish_reason
                                                     continue
                                                 delta = first_choice.get("delta", {}) or {}
                                                 if not delta:
-                                                    logger.debug("收到空的delta对象，跳过")
                                                     continue
                                                 content = delta.get("content")
                                                 if content:
@@ -384,11 +386,16 @@ class AIAnalyzer:
                                                     last_chunk_snapshot = content[-100:]
                                                     chunk_count += 1
                                                     buffer += content
-                                                    yield json.dumps({
-                                                        "stock_code": stock_code,
-                                                        "ai_analysis_chunk": content,
-                                                        "status": "analyzing"
-                                                    })
+                                                    pending += content
+                                                    # chunk by sentences
+                                                    out_chunks, pending = self._drain_chunks_from_buffer(pending)
+                                                    for c in out_chunks:
+                                                        chunks_sent += 1
+                                                        yield json.dumps({
+                                                            "stock_code": stock_code,
+                                                            "ai_analysis_chunk": c,
+                                                            "status": "analyzing"
+                                                        })
                                             except json.JSONDecodeError:
                                                 logger.error(f"[{correlation_id}] JSON解析错误，块内容: {line}")
                                                 if "streaming failed after retries" in line.lower():
@@ -396,7 +403,6 @@ class AIAnalyzer:
                                                     chunk_count = 0
                                                     break
                                                 continue
-                            # 正常结束或错误已处理
                             await limiter.on_success()
                             limiter.release()
                             break
@@ -411,21 +417,26 @@ class AIAnalyzer:
                             attempt += 1
                             continue
 
+                    # flush remainder
+                    if pending.strip():
+                        yield json.dumps({
+                            "stock_code": stock_code,
+                            "ai_analysis_chunk": pending,
+                            "status": "analyzing"
+                        })
+                        chunks_sent += 1
+                        pending = ""
+
                     logger.info(f"[{correlation_id}] AI流式处理完成，共收到 {chunk_count} 个内容片段，总长度: {len(buffer)}")
                     if first_chunk_snapshot is not None:
                         logger.debug(f"首帧快照: {first_chunk_snapshot}")
                     if last_chunk_snapshot is not None:
                         logger.debug(f"末帧快照: {last_chunk_snapshot}")
 
-                    # 如果buffer不为空且不以换行符结束，发送一个换行符
-                    if buffer and not buffer.endswith('\n'):
-                        yield json.dumps({
-                            "stock_code": stock_code,
-                            "ai_analysis_chunk": "\n",
-                            "status": "analyzing"
-                        })
+                    outcome = "ok"
+                    full_content = buffer
 
-                    # 若无任何片段，触发一次非流式降级补救（带限流与退避）
+                    # 若无任何片段，触发非流式降级补救
                     if chunk_count == 0 or (buffer.strip() == ""):
                         logger.warning(f"[{correlation_id}] AI流式分析0片段，触发非流式降级")
                         try:
@@ -435,25 +446,23 @@ class AIAnalyzer:
                             metrics.record_ai_fallback(self.PROVIDER, self.API_MODEL, reason="zero_chunks")
                         except Exception:
                             pass
-                        # 精简提示，减小max_tokens，降低温度/采样
                         concise_payload = dict(request_data)
                         concise_payload["stream"] = False
-                        concise_payload["max_tokens"] = max(128, int(self.API_MAX_TOKENS * 0.5))
-                        concise_payload["top_p"] = 0.8
                         concise_payload["temperature"] = 0.4
-                        # 在用户提示中加入简洁说明
-                        try:
-                            msgs = list(concise_payload.get("messages", []))
-                            if msgs and isinstance(msgs[0], dict):
-                                msgs[0]["content"] = str(msgs[0]["content"]) + "\n请用尽可能简短、结构化的要点进行分析（不超过150字）。"
-                                concise_payload["messages"] = msgs
-                        except Exception:
-                            pass
-
+                        concise_payload["top_p"] = 0.8
+                        # 动态max_tokens 256->512->768
+                        token_steps = [256, 512, 768]
                         analysis_text = ""
-                        attempt = 0
-                        max_attempts = 3
-                        while attempt < max_attempts and not analysis_text:
+                        for mt in token_steps:
+                            concise_payload["max_tokens"] = min(mt, self.API_MAX_TOKENS)
+                            # 附加简洁说明
+                            try:
+                                msgs = list(concise_payload.get("messages", []))
+                                if msgs and isinstance(msgs[0], dict):
+                                    msgs[0]["content"] = str(msgs[0]["content"]) + "\n请用尽可能简短、结构化的要点进行分析（不超过250字）。"
+                                    concise_payload["messages"] = msgs
+                            except Exception:
+                                pass
                             await limiter.wait_for_slot()
                             try:
                                 resp = await client.post(api_url, json=concise_payload, headers=headers)
@@ -481,7 +490,6 @@ class AIAnalyzer:
                                         pass
                                     limiter.release()
                                     await asyncio.sleep(delay)
-                                    attempt += 1
                                     continue
                                 else:
                                     limiter.release()
@@ -493,16 +501,17 @@ class AIAnalyzer:
                                     pass
                                 limiter.release()
                                 logger.warning(f"[{correlation_id}] 非流式补救网络错误: {str(e)}")
-                                await asyncio.sleep(RateLimiter.compute_backoff(attempt))
-                                attempt += 1
+                                await asyncio.sleep(0.25)
+                                continue
                         if analysis_text:
-                            # 回放为一个整块，以保持前端向后兼容（仍然是chunk事件）
-                            yield json.dumps({
-                                "stock_code": stock_code,
-                                "ai_analysis_chunk": analysis_text,
-                                "status": "analyzing"
-                            })
-                            # 写入缓存
+                            # 以统一chunker回放
+                            for c in self._chunk_text(analysis_text):
+                                chunks_sent += 1
+                                yield json.dumps({
+                                    "stock_code": stock_code,
+                                    "ai_analysis_chunk": c,
+                                    "status": "analyzing"
+                                })
                             try:
                                 self.cache.set(cache_key, {"analysis_text": analysis_text}, ttl_seconds=self.cache_ttl)
                             except Exception:
@@ -510,7 +519,6 @@ class AIAnalyzer:
                             full_content = analysis_text
                             outcome = "fallback"
                         else:
-                            # 多次失败后输出占位分析，避免击穿上游
                             note = generate_placeholder(stock_code, technical_summary)
                             try:
                                 metrics.record_ai_fallback(self.PROVIDER, self.API_MODEL, reason="placeholder")
@@ -522,23 +530,60 @@ class AIAnalyzer:
                                 "status": "analyzing"
                             })
                             full_content = note
+                            chunks_sent += 1
                             outcome = "degraded"
-                    else:
-                        full_content = buffer
-                        outcome = "ok"
 
-                    # 结束：计算评分/建议
+                    # 完整性控制与续写
+                    missing_sections = self._detect_missing_sections(full_content)
+                    if missing_sections:
+                        for sec in missing_sections:
+                            try:
+                                metrics.record_ai_missing_section(self.PROVIDER, self.API_MODEL, sec)
+                            except Exception:
+                                pass
+                    if saw_finish_reason == "length" or len(full_content) < self.MIN_OUTPUT_CHARS or missing_sections:
+                        try:
+                            metrics.record_ai_truncated_response(self.PROVIDER, self.API_MODEL, reason=(saw_finish_reason or ("short" if len(full_content) < self.MIN_OUTPUT_CHARS else "incomplete")))
+                        except Exception:
+                            pass
+                        rounds = 0
+                        while rounds < 2 and (len(full_content) < self.MIN_OUTPUT_CHARS or missing_sections):
+                            try:
+                                metrics.record_ai_autocontinue_call(self.PROVIDER, self.API_MODEL)
+                            except Exception:
+                                pass
+                            addition = await self._auto_continue_completion(client, api_url, headers, limiter, request_data, full_content, missing_sections, round_ix=rounds)
+                            addition = self._merge_dedup_addition(full_content, addition)
+                            if addition:
+                                full_content += addition
+                                for c in self._chunk_text(addition):
+                                    chunks_sent += 1
+                                    yield json.dumps({
+                                        "stock_code": stock_code,
+                                        "ai_analysis_chunk": c,
+                                        "status": "analyzing"
+                                    })
+                            missing_sections = self._detect_missing_sections(full_content)
+                            rounds += 1
+
+                    # 完结事件
                     recommendation = self._extract_recommendation(full_content)
                     score = self._calculate_analysis_score(full_content, technical_summary)
                     yield json.dumps({
                         "stock_code": stock_code,
                         "status": "completed",
                         "score": score,
-                        "recommendation": recommendation
+                        "recommendation": recommendation,
+                        "char_count": len(full_content),
+                        "sections_missing": missing_sections,
+                        "sections_ok": len(missing_sections) == 0,
+                        "finish_reason": saw_finish_reason or outcome,
+                        "chunks_sent": chunks_sent
                     })
                     try:
                         elapsed = time.perf_counter() - start_time
                         metrics.observe_ai_stream_duration(elapsed, model=self.API_MODEL, outcome=outcome)
+                        metrics.record_ai_output_chars(self.PROVIDER, self.API_MODEL, len(full_content))
                     except Exception:
                         pass
                 else:
@@ -546,7 +591,6 @@ class AIAnalyzer:
                     max_attempts = 3
                     attempt = 0
                     analysis_text = ""
-                    # 自适应降级参数
                     temp = 0.7
                     top_p = None
                     max_toks = self.API_MAX_TOKENS
@@ -612,19 +656,33 @@ class AIAnalyzer:
                             await asyncio.sleep(RateLimiter.compute_backoff(attempt))
                             attempt += 1
 
+                    # 非流式也做完整性控制（合并返回）
                     if analysis_text:
-                        # 写入缓存
+                        # 补全至达标
+                        full_text = analysis_text
+                        missing_sections = self._detect_missing_sections(full_text)
+                        rounds = 0
+                        while rounds < 2 and (len(full_text) < self.MIN_OUTPUT_CHARS or missing_sections):
+                            try:
+                                metrics.record_ai_autocontinue_call(self.PROVIDER, self.API_MODEL)
+                            except Exception:
+                                pass
+                            addition = await self._auto_continue_completion(client, api_url, headers, limiter, request_data, full_text, missing_sections, round_ix=rounds)
+                            addition = self._merge_dedup_addition(full_text, addition)
+                            if addition:
+                                full_text += addition
+                            missing_sections = self._detect_missing_sections(full_text)
+                            rounds += 1
                         try:
-                            self.cache.set(cache_key, {"analysis_text": analysis_text}, ttl_seconds=self.cache_ttl)
+                            self.cache.set(cache_key, {"analysis_text": full_text}, ttl_seconds=self.cache_ttl)
                         except Exception:
                             pass
-                        # 结束输出
-                        recommendation = self._extract_recommendation(analysis_text)
-                        score = self._calculate_analysis_score(analysis_text, technical_summary)
+                        recommendation = self._extract_recommendation(full_text)
+                        score = self._calculate_analysis_score(full_text, technical_summary)
                         yield json.dumps({
                             "stock_code": stock_code,
                             "status": "completed",
-                            "analysis": analysis_text,
+                            "analysis": full_text,
                             "score": score,
                             "recommendation": recommendation,
                             "rsi": rsi,
@@ -633,10 +691,13 @@ class AIAnalyzer:
                             "ma_trend": ma_trend,
                             "macd_signal": macd_signal_type,
                             "volume_status": volume_status,
-                            "analysis_date": analysis_date
+                            "analysis_date": analysis_date,
+                            "char_count": len(full_text),
+                            "sections_missing": missing_sections,
+                            "sections_ok": len(missing_sections) == 0,
+                            "finish_reason": "nonstream"
                         })
                     else:
-                        # 多次失败后返回占位说明
                         note = generate_placeholder(stock_code, technical_summary)
                         try:
                             metrics.record_ai_fallback(self.PROVIDER, self.API_MODEL, reason="placeholder")
@@ -654,9 +715,13 @@ class AIAnalyzer:
                             "ma_trend": ma_trend,
                             "macd_signal": macd_signal_type,
                             "volume_status": volume_status,
-                            "analysis_date": analysis_date
+                            "analysis_date": analysis_date,
+                            "char_count": len(note),
+                            "sections_missing": self._detect_missing_sections(note),
+                            "sections_ok": False,
+                            "finish_reason": "degraded"
                         })
-            
+
         except Exception as e:
             logger.error(f"AI分析出错: {str(e)}", exc_info=True)
             yield json.dumps({
@@ -664,16 +729,16 @@ class AIAnalyzer:
                 "error": f"分析出错: {str(e)}",
                 "status": "error"
             })
-            
+
     def _extract_recommendation(self, analysis_text: str) -> str:
         """从分析文本中提取投资建议"""
         # 查找投资建议部分
         investment_advice_pattern = r"##\s*投资建议\s*\n(.*?)(?:\n##|\Z)"
         match = re.search(investment_advice_pattern, analysis_text, re.DOTALL)
-        
+
         if match:
             advice_text = match.group(1).strip()
-            
+
             # 提取关键建议
             if "买入" in advice_text or "增持" in advice_text:
                 return "买入"
@@ -683,30 +748,30 @@ class AIAnalyzer:
                 return "持有"
             else:
                 return "观望"
-        
+
         return "观望"  # 默认建议
-        
+
     def _calculate_analysis_score(self, analysis_text: str, technical_summary: dict) -> int:
         """计算分析评分"""
         score = 50  # 基础分数
-        
+
         # 根据技术指标调整分数
         if technical_summary['trend'] == 'upward':
             score += 10
         else:
             score -= 10
-            
+
         if technical_summary['volume_trend'] == 'increasing':
             score += 5
         else:
             score -= 5
-            
+
         rsi = technical_summary['rsi_level']
         if rsi < 30:  # 超卖
             score += 15
         elif rsi > 70:  # 超买
             score -= 15
-            
+
         # 根据分析文本中的关键词调整分数
         if "强烈买入" in analysis_text or "显著上涨" in analysis_text:
             score += 20
@@ -716,22 +781,127 @@ class AIAnalyzer:
             score -= 20
         elif "卖出" in analysis_text or "看跌" in analysis_text:
             score -= 10
-            
+
         # 确保分数在0-100范围内
         return max(0, min(100, score))
-    
-    def _truncate_json_for_logging(self, json_obj, max_length=500):
-        """
-        截断JSON对象以便记录日志
-        
-        Args:
-            json_obj: JSON对象
-            max_length: 最大长度
-            
-        Returns:
-            截断后的字符串
-        """
-        json_str = json.dumps(json_obj, ensure_ascii=False)
-        if len(json_str) <= max_length:
-            return json_str
-        return json_str[:max_length] + "..." 
+
+    # ---- 新增：输出完整性与分块工具 ----
+    def _split_sentences(self, text: str):
+        try:
+            parts = re.split(r'(?<=[。！？!\?；;\n])', text)
+            return [p for p in (parts or []) if p and p.strip()]
+        except Exception:
+            return [text]
+
+    def _drain_chunks_from_buffer(self, buf: str, max_bytes: int = None, min_sentences: int = None):
+        max_b = int(max_bytes or self.CHUNK_MAX_BYTES)
+        min_s = int(min_sentences or self.CHUNK_MIN_SENTENCES)
+        sentences = self._split_sentences(buf)
+        if not sentences:
+            return [], buf
+        # keep last partial sentence as remainder if buffer doesn't end with delimiter
+        remainder = ""
+        if not (buf.endswith("\n") or re.search(r'[。！？!\?；;]$', buf)):
+            remainder = sentences.pop() if sentences else ""
+        chunks = []
+        cur = ""
+        cur_sents = 0
+        for s in sentences:
+            eb = len((cur + s).encode('utf-8'))
+            if cur and (eb > max_b) and (cur_sents >= min_s):
+                chunks.append(cur)
+                cur = ""
+                cur_sents = 0
+            cur += s
+            cur_sents += 1
+        if cur:
+            if cur_sents >= min_s or len(cur.encode('utf-8')) >= max_b:
+                chunks.append(cur)
+            else:
+                remainder = cur + remainder
+        return chunks, remainder
+
+    def _chunk_text(self, text: str, max_bytes: int = None, min_sentences: int = None):
+        chunks, rem = self._drain_chunks_from_buffer(text, max_bytes=max_bytes, min_sentences=min_sentences)
+        if rem and rem.strip():
+            chunks.append(rem)
+        return chunks
+
+    def _merge_dedup_addition(self, base: str, addition: str) -> str:
+        if not base:
+            return addition or ""
+        add = addition or ""
+        try:
+            max_overlap = min(120, len(add))
+            for i in range(max_overlap, 10, -1):
+                if base.endswith(add[:i]):
+                    return add[i:]
+            return add
+        except Exception:
+            return add
+
+    def _detect_missing_sections(self, text: str):
+        missing = []
+        body = text or ""
+        try:
+            patterns = {
+                "概览": r"(?:^|\n)\s*(?:[#【 ]{0,2})?(?:概览|总体|总览|概述|概况)",
+                "主要信号": r"(?:^|\n)\s*(?:[#【 ]{0,2})?(?:主要信号|关键信号|亮点|要点)",
+                "技术面": r"(?:^|\n)\s*(?:[#【 ]{0,2})?(?:技术面|技术分析|技术指标)",
+                "基本面": r"(?:^|\n)\s*(?:[#【 ]{0,2})?(?:基本面|基本分析|基本情况|财务|估值)",
+                "风险": r"(?:^|\n)\s*(?:[#【 ]{0,2})?(?:风险|不利因素|注意事项)",
+                "操作建议": r"(?:^|\n)\s*(?:[#【 ]{0,2})?(?:操作建议|投资建议|策略|建议)"
+            }
+            for sec in self.REQUIRED_SECTIONS:
+                pat = patterns.get(sec)
+                if not pat or not re.search(pat, body, flags=re.IGNORECASE):
+                    missing.append(sec)
+        except Exception:
+            pass
+        return missing
+
+    async def _auto_continue_completion(self, client, api_url: str, headers: dict, limiter, base_payload: dict, current_text: str, missing_sections, round_ix: int = 0):
+        try:
+            contend = "、".join(missing_sections or [])
+            prompt_suffix = (
+                "\n请基于已生成的内容，仅补全缺失段落并延续风格，避免重复，中文回答。"
+                f"缺失段落: {contend if contend else '无'}。"
+                "注意：严格输出六段结构（概览/主要信号/技术面/基本面/风险/操作建议），如果已有某段，请勿重写。"
+                "直接给出新增内容。"
+            )
+            payload = dict(base_payload)
+            payload["stream"] = False
+            payload["temperature"] = 0.2
+            payload["top_p"] = 0.8
+            payload["max_tokens"] = 256
+            msgs = list(payload.get("messages", []))
+            last = (current_text or "")[-2000:]
+            msgs.append({
+                "role": "user",
+                "content": f"已生成内容（节选）：\n{last}\n{prompt_suffix}"
+            })
+            payload["messages"] = msgs
+
+            await limiter.wait_for_slot()
+            try:
+                resp = await client.post(api_url, json=payload, headers=headers)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    ch = (data.get("choices") or [{}])[0]
+                    msg = ch.get("message") or {}
+                    cont = msg.get("content") or ch.get("text") or data.get("content") or ""
+                    await limiter.on_success()
+                    return cont or ""
+                elif resp.status_code in (429, 500, 502, 503, 504):
+                    delay = await limiter.on_transient_error(resp.status_code, resp.headers.get("Retry-After") if hasattr(resp, "headers") else None)
+                    await asyncio.sleep(delay)
+                    return ""
+                else:
+                    return ""
+            except httpx.RequestError:
+                await asyncio.sleep(0.25)
+                return ""
+            finally:
+                limiter.release()
+        except Exception:
+            return ""
