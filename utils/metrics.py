@@ -112,6 +112,18 @@ if CollectorRegistry is not None:
         ["provider", "model", "reason"],
         registry=_registry,
     )
+    AI_FALLBACK_SUCCESS = Counter(
+        "ai_fallback_success_total",
+        "Total number of successful non-stream fallbacks that returned usable content",
+        ["provider", "model", "reason"],
+        registry=_registry,
+    )
+    AI_FALLBACK_FAIL = Counter(
+        "ai_fallback_fail_total",
+        "Total number of non-stream fallback attempts that still failed to return content",
+        ["provider", "model", "reason"],
+        registry=_registry,
+    )
     AI_FALLBACK_BYTES = Counter(
         "ai_fallback_bytes_total",
         "Total number of bytes returned via non-stream fallback",
@@ -164,6 +176,8 @@ else:
     AI_UPSTREAM_TTFB = None
     AI_UPSTREAM_IDLE_TIMEOUTS = None
     AI_FALLBACK_NON_STREAM = None
+    AI_FALLBACK_SUCCESS = None
+    AI_FALLBACK_FAIL = None
     AI_FALLBACK_BYTES = None
     AI_STREAM_ZERO_THEN_FALLBACK = None
     AI_OUTPUT_CHARS = None
@@ -447,6 +461,22 @@ def record_ai_fallback_bytes(provider: str, model: str, byte_count: int) -> None
     if AI_FALLBACK_BYTES is not None:
         try:
             AI_FALLBACK_BYTES.labels(provider=provider or "unknown", model=model or "unknown").inc(max(0, int(byte_count)))
+        except Exception:
+            pass
+
+
+def record_ai_fallback_success(provider: str, model: str, reason: str = "unknown") -> None:
+    if AI_FALLBACK_SUCCESS is not None:
+        try:
+            AI_FALLBACK_SUCCESS.labels(provider=provider or "unknown", model=model or "unknown", reason=reason or "unknown").inc()
+        except Exception:
+            pass
+
+
+def record_ai_fallback_fail(provider: str, model: str, reason: str = "unknown") -> None:
+    if AI_FALLBACK_FAIL is not None:
+        try:
+            AI_FALLBACK_FAIL.labels(provider=provider or "unknown", model=model or "unknown", reason=reason or "unknown").inc()
         except Exception:
             pass
 
