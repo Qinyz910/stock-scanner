@@ -76,6 +76,42 @@ if CollectorRegistry is not None:
         registry=_registry,
         buckets=(0.1, 0.25, 0.5, 1, 2, 5, 10, 20, 30, 60)
     )
+    # Additional stream observability
+    AI_STREAM_FRAGMENTS = Counter(
+        "ai_stream_fragments_total",
+        "Total number of content fragments received from upstream AI streams",
+        ["provider", "model"],
+        registry=_registry,
+    )
+    AI_STREAM_EMPTY = Counter(
+        "ai_stream_empty_total",
+        "Total number of upstream streams that produced zero fragments",
+        ["provider", "model"],
+        registry=_registry,
+    )
+
+    # Upstream connection timing/idle
+    AI_UPSTREAM_TTFB = Histogram(
+        "ai_upstream_ttfb_seconds",
+        "Time to first byte from upstream AI provider",
+        ["provider", "model"],
+        registry=_registry,
+        buckets=(0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 20, 30)
+    )
+    AI_UPSTREAM_IDLE_TIMEOUTS = Counter(
+        "ai_upstream_idle_timeouts_total",
+        "Total number of upstream idle read timeouts during streaming",
+        ["provider", "model"],
+        registry=_registry,
+    )
+
+    # Fallbacks
+    AI_FALLBACK_NON_STREAM = Counter(
+        "ai_fallback_non_stream_total",
+        "Total number of times non-stream fallback was used",
+        ["provider", "model", "reason"],
+        registry=_registry,
+    )
 
     # New metrics for output completeness/observability
     AI_OUTPUT_CHARS = Counter(
@@ -111,6 +147,11 @@ else:
     AI_STREAM_ZERO_CHUNKS = None
     AI_STREAM_FALLBACK = None
     AI_STREAM_DURATION = None
+    AI_STREAM_FRAGMENTS = None
+    AI_STREAM_EMPTY = None
+    AI_UPSTREAM_TTFB = None
+    AI_UPSTREAM_IDLE_TIMEOUTS = None
+    AI_FALLBACK_NON_STREAM = None
     AI_OUTPUT_CHARS = None
     AI_MISSING_SECTIONS = None
     AI_AUTOCONTINUE_CALLS = None
@@ -360,5 +401,45 @@ def record_ai_truncated_response(provider: str, model: str, reason: str = "unkno
     if AI_TRUNCATED_RESPONSES is not None:
         try:
             AI_TRUNCATED_RESPONSES.labels(provider=provider or "unknown", model=model or "unknown", reason=reason or "unknown").inc()
+        except Exception:
+            pass
+
+
+def observe_ai_upstream_ttfb(provider: str, model: str, seconds: float) -> None:
+    if AI_UPSTREAM_TTFB is not None:
+        try:
+            AI_UPSTREAM_TTFB.labels(provider=provider or "unknown", model=model or "unknown").observe(max(0.0, float(seconds)))
+        except Exception:
+            pass
+
+
+def record_ai_upstream_idle_timeout(provider: str, model: str) -> None:
+    if AI_UPSTREAM_IDLE_TIMEOUTS is not None:
+        try:
+            AI_UPSTREAM_IDLE_TIMEOUTS.labels(provider=provider or "unknown", model=model or "unknown").inc()
+        except Exception:
+            pass
+
+
+def record_ai_fallback_non_stream(provider: str, model: str, reason: str = "unknown") -> None:
+    if AI_FALLBACK_NON_STREAM is not None:
+        try:
+            AI_FALLBACK_NON_STREAM.labels(provider=provider or "unknown", model=model or "unknown", reason=reason or "unknown").inc()
+        except Exception:
+            pass
+
+
+def record_ai_stream_fragments(provider: str, model: str, count: int) -> None:
+    if AI_STREAM_FRAGMENTS is not None:
+        try:
+            AI_STREAM_FRAGMENTS.labels(provider=provider or "unknown", model=model or "unknown").inc(max(0, int(count)))
+        except Exception:
+            pass
+
+
+def record_ai_stream_empty(provider: str, model: str) -> None:
+    if AI_STREAM_EMPTY is not None:
+        try:
+            AI_STREAM_EMPTY.labels(provider=provider or "unknown", model=model or "unknown").inc()
         except Exception:
             pass

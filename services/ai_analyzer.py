@@ -79,9 +79,19 @@ class AIAnalyzer:
         self.CHUNK_MIN_SENTENCES = int(os.getenv("AI_CHUNK_MIN_SENTENCES", "2"))
         self.REQUIRED_SECTIONS = ["概览", "主要信号", "技术面", "基本面", "风险", "操作建议"]
 
+        # SSE/streaming timeouts
+        try:
+            self.SSE_IDLE_SECONDS = float(os.getenv("AI_SSE_IDLE_SECONDS", "8"))
+        except Exception:
+            self.SSE_IDLE_SECONDS = 8.0
+        try:
+            self.SSE_TOTAL_SECONDS = float(os.getenv("AI_SSE_TOTAL_SECONDS", "30"))
+        except Exception:
+            self.SSE_TOTAL_SECONDS = 30.0
+
         logger.debug(
             f"初始化AIAnalyzer: PROVIDER={self.PROVIDER}, API_URL={self.API_URL}, API_MODEL={self.API_MODEL}, API_KEY={'已提供' if self.API_KEY else '未提供'}, API_TIMEOUT={self.API_TIMEOUT}, "
-            f"MIN_CHARS={self.MIN_OUTPUT_CHARS}, CHUNK_MAX_BYTES={self.CHUNK_MAX_BYTES}, CHUNK_MIN_SENTENCES={self.CHUNK_MIN_SENTENCES}"
+            f"MIN_CHARS={self.MIN_OUTPUT_CHARS}, CHUNK_MAX_BYTES={self.CHUNK_MAX_BYTES}, CHUNK_MIN_SENTENCES={self.CHUNK_MIN_SENTENCES}, SSE_IDLE_SECONDS={self.SSE_IDLE_SECONDS}, SSE_TOTAL_SECONDS={self.SSE_TOTAL_SECONDS}"
         )
 
     async def get_ai_analysis(self, df: pd.DataFrame, stock_code: str, market_type: str = 'A', stream: bool = False) -> AsyncGenerator[str, None]:
@@ -243,10 +253,20 @@ class AIAnalyzer:
             }
 
             # 准备请求头
-            headers = {
+            headers_base = {
                 "Content-Type": "application/json",
                 "Authorization": f"Bearer {self.API_KEY}"
             }
+            headers_stream = dict(headers_base)
+            headers_stream.update({
+                "Accept": "text/event-stream",
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+            })
+            headers_json = dict(headers_base)
+            headers_json.update({
+                "Accept": "application/json"
+            })
 
             # 获取当前日期作为分析日期
             analysis_date = datetime.now().strftime("%Y-%m-%d")
@@ -285,8 +305,8 @@ class AIAnalyzer:
                 return
 
             # 异步请求API
-            timeout = httpx.Timeout(read=self.API_TIMEOUT, connect=30.0, write=self.API_TIMEOUT, pool=self.API_TIMEOUT)
-            async with httpx.AsyncClient(timeout=timeout) as client:
+            timeout_post = httpx.Timeout(read=self.API_TIMEOUT, connect=30.0, write=self.API_TIMEOUT, pool=self.API_TIMEOUT)
+            async with httpx.AsyncClient(timeout=timeout_post) as client:
                 logger.debug(f"[{correlation_id}] 发送AI请求: URL={api_url}, MODEL={self.API_MODEL}, STREAM={stream}")
 
                 # 先发送技术指标数据
@@ -313,10 +333,32 @@ class AIAnalyzer:
 
                     max_attempts = 3
                     attempt = 0
+                    # SSE parsing state
+                    sse_line_buffer = ""
+                    sse_data_lines = []
+                    sse_event_name = None
+                    ttfb_recorded = False
+                    ttfb_seconds = 0.0
+                    sample_logged = False
+
+                    # Per-call timeouts
+                    timeout_stream = httpx.Timeout(read=float(getattr(self, 'SSE_IDLE_SECONDS', 8)), connect=30.0, write=30.0, pool=30.0)
+
                     while attempt < max_attempts:
                         await limiter.wait_for_slot()
                         try:
-                            async with client.stream("POST", api_url, json=request_data, headers=headers) as response:
+                            req_start = time.perf_counter()
+                            try:
+                                stream_cm = client.stream("POST", api_url, json=request_data, headers=headers_stream, timeout=timeout_stream)
+                            except TypeError:
+                                stream_cm = client.stream("POST", api_url, json=request_data, headers=headers_stream)
+                            async with stream_cm as response:
+                                # Log basic headers (sanitized)
+                                try:
+                                    logger.debug(f"[{correlation_id}] 上游响应头: {dict(response.headers)}")
+                                except Exception:
+                                    pass
+
                                 if response.status_code != 200:
                                     try:
                                         error_text = await response.aread()
@@ -325,12 +367,25 @@ class AIAnalyzer:
                                     except Exception:
                                         error_message = f"HTTP {response.status_code}"
                                     logger.error(f"[{correlation_id}] AI 流式请求失败: {response.status_code} - {error_message}")
+                                    if response.status_code in (401, 403):
+                                        try:
+                                            metrics.record_ai_fallback_non_stream(self.PROVIDER, self.API_MODEL, reason="auth")
+                                        except Exception:
+                                            pass
+                                        limiter.release()
+                                        chunk_count = 0
+                                        break
                                     if response.status_code in (429, 500, 502, 503, 504):
                                         retry_after = None
                                         try:
                                             retry_after = response.headers.get("Retry-After")
                                         except Exception:
                                             retry_after = None
+                                        if response.status_code == 429:
+                                            try:
+                                                metrics.record_ai_rate_limit_hit(self.PROVIDER, self.API_MODEL)
+                                            except Exception:
+                                                pass
                                         delay = await limiter.on_transient_error(response.status_code, retry_after)
                                         try:
                                             metrics.record_ai_retry(self.PROVIDER, self.API_MODEL, reason=str(response.status_code))
@@ -345,66 +400,207 @@ class AIAnalyzer:
                                         chunk_count = 0
                                         break
                                 else:
+                                    done = False
                                     async for chunk in response.aiter_text():
                                         if not chunk:
                                             continue
-                                        lines = chunk.strip().split('\n')
-                                        for line in lines:
-                                            line = line.strip()
-                                            if not line:
+                                        sse_line_buffer += chunk
+                                        # Drain complete lines from buffer
+                                        while "\n" in sse_line_buffer:
+                                            raw_line, sse_line_buffer = sse_line_buffer.split("\n", 1)
+                                            line = raw_line.rstrip("\r")
+
+                                            # Event boundary: empty line
+                                            if line.strip() == "":
+                                                if sse_data_lines:
+                                                    payload = "\n".join(sse_data_lines).strip()
+                                                    sse_data_lines = []
+                                                    if payload:
+                                                        if not ttfb_recorded:
+                                                            ttfb_seconds = time.perf_counter() - req_start
+                                                            try:
+                                                                metrics.observe_ai_upstream_ttfb(self.PROVIDER, self.API_MODEL, ttfb_seconds)
+                                                            except Exception:
+                                                                pass
+                                                            ttfb_recorded = True
+                                                        if not sample_logged:
+                                                            try:
+                                                                logger.debug(f"[{correlation_id}] 首帧载荷样本: {payload[:1024]}")
+                                                            except Exception:
+                                                                pass
+                                                            sample_logged = True
+                                                        if payload == "[DONE]":
+                                                            logger.debug(f"[{correlation_id}] 收到流结束标记 [DONE]")
+                                                            done = True
+                                                            break
+                                                        try:
+                                                            if payload.strip().startswith('{'):
+                                                                chunk_data = json.loads(payload)
+                                                            else:
+                                                                # 非JSON负载忽略
+                                                                chunk_data = None
+                                                            if not chunk_data:
+                                                                continue
+                                                            choices_list = chunk_data.get("choices", []) if isinstance(chunk_data, dict) else []
+                                                            if not isinstance(choices_list, list) or len(choices_list) == 0:
+                                                                continue
+                                                            first_choice = choices_list[0] or {}
+                                                            finish_reason = first_choice.get("finish_reason")
+                                                            if finish_reason in ("stop", "length"):
+                                                                saw_finish_reason = finish_reason
+                                                                continue
+                                                            delta = first_choice.get("delta", {}) or {}
+                                                            content = delta.get("content") if isinstance(delta, dict) else None
+                                                            if not content:
+                                                                # 兼容有些提供商可能直接返回 text 字段
+                                                                content = first_choice.get("text") or None
+                                                            if content:
+                                                                if first_chunk_snapshot is None:
+                                                                    first_chunk_snapshot = content[:100]
+                                                                last_chunk_snapshot = content[-100:]
+                                                                chunk_count += 1
+                                                                buffer += content
+                                                                pending += content
+                                                                out_chunks, pending = self._drain_chunks_from_buffer(pending)
+                                                                for c in out_chunks:
+                                                                    chunks_sent += 1
+                                                                    yield json.dumps({
+                                                                        "stock_code": stock_code,
+                                                                        "ai_analysis_chunk": c,
+                                                                        "status": "analyzing"
+                                                                    })
+                                                        except json.JSONDecodeError:
+                                                            logger.error(f"[{correlation_id}] JSON解析错误，事件载荷: {payload[:180]}")
+                                                            continue
                                                 continue
-                                            if line.startswith("data: "):
-                                                line = line[6:]
-                                            if line == "[DONE]":
+
+                                            # Handle fields
+                                            if line.startswith("data:"):
+                                                data_val = line[5:]
+                                                if data_val.startswith(" "):
+                                                    data_val = data_val[1:]
+                                                # If we already buffered a previous data payload without a blank-line delimiter,
+                                                # try to finalize it when the next data: line arrives (common with OpenAI-style SSE)
+                                                if sse_data_lines:
+                                                    prev_payload = "\n".join(sse_data_lines).strip()
+                                                    if prev_payload:
+                                                        if not ttfb_recorded:
+                                                            ttfb_seconds = time.perf_counter() - req_start
+                                                            try:
+                                                                metrics.observe_ai_upstream_ttfb(self.PROVIDER, self.API_MODEL, ttfb_seconds)
+                                                            except Exception:
+                                                                pass
+                                                            ttfb_recorded = True
+                                                        if prev_payload == "[DONE]":
+                                                            logger.debug(f"[{correlation_id}] 收到流结束标记 [DONE]")
+                                                            done = True
+                                                            sse_data_lines = []
+                                                            break
+                                                        try:
+                                                            if prev_payload.strip().startswith('{'):
+                                                                chunk_data = json.loads(prev_payload)
+                                                            else:
+                                                                chunk_data = None
+                                                            if chunk_data:
+                                                                choices_list = chunk_data.get("choices", []) if isinstance(chunk_data, dict) else []
+                                                                if isinstance(choices_list, list) and len(choices_list) > 0:
+                                                                    first_choice = choices_list[0] or {}
+                                                                    finish_reason = first_choice.get("finish_reason")
+                                                                    if finish_reason in ("stop", "length"):
+                                                                        saw_finish_reason = finish_reason
+                                                                    else:
+                                                                        delta = first_choice.get("delta", {}) or {}
+                                                                        content = delta.get("content") if isinstance(delta, dict) else None
+                                                                        if not content:
+                                                                            content = first_choice.get("text") or None
+                                                                        if content:
+                                                                            if first_chunk_snapshot is None:
+                                                                                first_chunk_snapshot = content[:100]
+                                                                            last_chunk_snapshot = content[-100:]
+                                                                            chunk_count += 1
+                                                                            buffer += content
+                                                                            pending += content
+                                                                            out_chunks, pending = self._drain_chunks_from_buffer(pending)
+                                                                            for c in out_chunks:
+                                                                                chunks_sent += 1
+                                                                                yield json.dumps({
+                                                                                    "stock_code": stock_code,
+                                                                                    "ai_analysis_chunk": c,
+                                                                                    "status": "analyzing"
+                                                                                })
+                                                        except json.JSONDecodeError:
+                                                            logger.error(f"[{correlation_id}] JSON解析错误，事件载荷: {prev_payload[:180]}")
+                                                        finally:
+                                                            sse_data_lines = []
+                                                sse_data_lines.append(data_val)
+                                                continue
+                                            if line.startswith("event:"):
+                                                sse_event_name = line[6:].strip() or None
+                                                continue
+                                            # ignore other fields like id:, retry:
+
+                                        if done:
+                                            break
+
+                                    # Flush any remaining event payload without trailing delimiter
+                                    if not done and sse_data_lines:
+                                        payload = "\n".join(sse_data_lines).strip()
+                                        sse_data_lines = []
+                                        if payload:
+                                            if not ttfb_recorded:
+                                                ttfb_seconds = time.perf_counter() - req_start
+                                                try:
+                                                    metrics.observe_ai_upstream_ttfb(self.PROVIDER, self.API_MODEL, ttfb_seconds)
+                                                except Exception:
+                                                    pass
+                                                ttfb_recorded = True
+                                            if payload == "[DONE]":
                                                 logger.debug(f"[{correlation_id}] 收到流结束标记 [DONE]")
-                                                continue
-                                            try:
-                                                if "error" in line.lower() and line.strip().startswith('{'):
-                                                    try:
-                                                        _err = json.loads(line)
-                                                        err_msg = _err.get("error", line)
-                                                    except Exception:
-                                                        err_msg = line
-                                                    logger.error(f"[{correlation_id}] 流式响应中收到错误: {err_msg}")
-                                                    continue
-                                                chunk_data = json.loads(line)
-                                                choices_list = chunk_data.get("choices", [])
-                                                if not isinstance(choices_list, list) or len(choices_list) == 0:
-                                                    continue
-                                                first_choice = choices_list[0] or {}
-                                                finish_reason = first_choice.get("finish_reason")
-                                                if finish_reason in ("stop", "length"):
-                                                    saw_finish_reason = finish_reason
-                                                    continue
-                                                delta = first_choice.get("delta", {}) or {}
-                                                if not delta:
-                                                    continue
-                                                content = delta.get("content")
-                                                if content:
-                                                    if first_chunk_snapshot is None:
-                                                        first_chunk_snapshot = content[:100]
-                                                    last_chunk_snapshot = content[-100:]
-                                                    chunk_count += 1
-                                                    buffer += content
-                                                    pending += content
-                                                    # chunk by sentences
-                                                    out_chunks, pending = self._drain_chunks_from_buffer(pending)
-                                                    for c in out_chunks:
-                                                        chunks_sent += 1
-                                                        yield json.dumps({
-                                                            "stock_code": stock_code,
-                                                            "ai_analysis_chunk": c,
-                                                            "status": "analyzing"
-                                                        })
-                                            except json.JSONDecodeError:
-                                                logger.error(f"[{correlation_id}] JSON解析错误，块内容: {line}")
-                                                if "streaming failed after retries" in line.lower():
-                                                    logger.error(f"[{correlation_id}] 检测到流式传输失败")
-                                                    chunk_count = 0
-                                                    break
-                                                continue
+                                            else:
+                                                try:
+                                                    if payload.strip().startswith('{'):
+                                                        chunk_data = json.loads(payload)
+                                                    else:
+                                                        chunk_data = None
+                                                    if chunk_data:
+                                                        choices_list = chunk_data.get("choices", []) if isinstance(chunk_data, dict) else []
+                                                        if isinstance(choices_list, list) and len(choices_list) > 0:
+                                                            first_choice = choices_list[0] or {}
+                                                            delta = first_choice.get("delta", {}) or {}
+                                                            content = delta.get("content") if isinstance(delta, dict) else None
+                                                            if not content:
+                                                                content = first_choice.get("text") or None
+                                                            if content:
+                                                                if first_chunk_snapshot is None:
+                                                                    first_chunk_snapshot = content[:100]
+                                                                last_chunk_snapshot = content[-100:]
+                                                                chunk_count += 1
+                                                                buffer += content
+                                                                pending += content
+                                                                out_chunks, pending = self._drain_chunks_from_buffer(pending)
+                                                                for c in out_chunks:
+                                                                    chunks_sent += 1
+                                                                    yield json.dumps({
+                                                                        "stock_code": stock_code,
+                                                                        "ai_analysis_chunk": c,
+                                                                        "status": "analyzing"
+                                                                    })
+                                                except json.JSONDecodeError:
+                                                    logger.error(f"[{correlation_id}] JSON解析错误，剩余事件载荷: {payload[:180]}")
+                                                    pass
+
                             await limiter.on_success()
                             limiter.release()
+                            break
+                        except httpx.ReadTimeout:
+                            # Idle read timeout
+                            try:
+                                metrics.record_ai_upstream_idle_timeout(self.PROVIDER, self.API_MODEL)
+                            except Exception:
+                                pass
+                            logger.warning(f"[{correlation_id}] 上游流在空闲期间超时 (idle read)")
+                            limiter.release()
+                            attempt = max_attempts  # move to fallback
                             break
                         except httpx.RequestError as e:
                             logger.error(f"[{correlation_id}] 流式请求网络错误: {str(e)}")
@@ -436,6 +632,13 @@ class AIAnalyzer:
                     outcome = "ok"
                     full_content = buffer
 
+                    try:
+                        metrics.record_ai_stream_fragments(self.PROVIDER, self.API_MODEL, chunk_count)
+                        if chunk_count == 0:
+                            metrics.record_ai_stream_empty(self.PROVIDER, self.API_MODEL)
+                    except Exception:
+                        pass
+
                     # 若无任何片段，触发非流式降级补救
                     if chunk_count == 0 or (buffer.strip() == ""):
                         logger.warning(f"[{correlation_id}] AI流式分析0片段，触发非流式降级")
@@ -444,6 +647,7 @@ class AIAnalyzer:
                             metrics.record_ai_stream_fallback(self.API_MODEL, reason="zero_chunks")
                             metrics.record_ai_zero_chunks(self.PROVIDER, self.API_MODEL, reason="zero_chunks")
                             metrics.record_ai_fallback(self.PROVIDER, self.API_MODEL, reason="zero_chunks")
+                            metrics.record_ai_fallback_non_stream(self.PROVIDER, self.API_MODEL, reason="stream_zero")
                         except Exception:
                             pass
                         concise_payload = dict(request_data)
@@ -465,7 +669,7 @@ class AIAnalyzer:
                                 pass
                             await limiter.wait_for_slot()
                             try:
-                                resp = await client.post(api_url, json=concise_payload, headers=headers)
+                                resp = await client.post(api_url, json=concise_payload, headers=headers_json)
                                 if resp.status_code == 200:
                                     resp_data = resp.json()
                                     choices_list = resp_data.get("choices", [])
@@ -552,7 +756,7 @@ class AIAnalyzer:
                                 metrics.record_ai_autocontinue_call(self.PROVIDER, self.API_MODEL)
                             except Exception:
                                 pass
-                            addition = await self._auto_continue_completion(client, api_url, headers, limiter, request_data, full_content, missing_sections, round_ix=rounds)
+                            addition = await self._auto_continue_completion(client, api_url, headers_json, limiter, request_data, full_content, missing_sections, round_ix=rounds)
                             addition = self._merge_dedup_addition(full_content, addition)
                             if addition:
                                 full_content += addition
@@ -611,7 +815,7 @@ class AIAnalyzer:
                                 pass
                         await limiter.wait_for_slot()
                         try:
-                            response = await client.post(api_url, json=payload, headers=headers)
+                            response = await client.post(api_url, json=payload, headers=headers_json)
                             if response.status_code == 200:
                                 response_data = response.json()
                                 choices_list = response_data.get("choices", [])
@@ -667,7 +871,7 @@ class AIAnalyzer:
                                 metrics.record_ai_autocontinue_call(self.PROVIDER, self.API_MODEL)
                             except Exception:
                                 pass
-                            addition = await self._auto_continue_completion(client, api_url, headers, limiter, request_data, full_text, missing_sections, round_ix=rounds)
+                            addition = await self._auto_continue_completion(client, api_url, headers_json, limiter, request_data, full_text, missing_sections, round_ix=rounds)
                             addition = self._merge_dedup_addition(full_text, addition)
                             if addition:
                                 full_text += addition
