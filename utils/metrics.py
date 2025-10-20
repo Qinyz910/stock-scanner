@@ -55,12 +55,36 @@ if CollectorRegistry is not None:
     MEMORY_RSS = Gauge(
         "process_memory_rss_bytes", "Process resident memory size in bytes", registry=_registry
     )
+
+    # AI streaming metrics
+    AI_STREAM_ZERO_CHUNKS = Counter(
+        "ai_stream_zero_chunks_count",
+        "Count of AI stream sessions that yielded zero content chunks",
+        ["model", "reason"],
+        registry=_registry,
+    )
+    AI_STREAM_FALLBACK = Counter(
+        "ai_stream_fallback_count",
+        "Count of AI stream sessions that triggered fallback",
+        ["model", "reason"],
+        registry=_registry,
+    )
+    AI_STREAM_DURATION = Histogram(
+        "ai_stream_duration_seconds",
+        "Duration of AI streaming from first request to completion",
+        ["model", "outcome"],
+        registry=_registry,
+        buckets=(0.1, 0.25, 0.5, 1, 2, 5, 10, 20, 30, 60)
+    )
 else:
     API_LATENCY = None
     CACHE_HITS = None
     CACHE_MISSES = None
     BACKTEST_DURATION = None
     MEMORY_RSS = None
+    AI_STREAM_ZERO_CHUNKS = None
+    AI_STREAM_FALLBACK = None
+    AI_STREAM_DURATION = None
 
 
 def instrument_fastapi(app: FastAPI) -> None:
@@ -141,5 +165,30 @@ def observe_backtest_duration(seconds: float, status: str = "ok") -> None:
     if BACKTEST_DURATION is not None:
         try:
             BACKTEST_DURATION.labels(status=status).observe(seconds)
+        except Exception:
+            pass
+
+
+# AI stream metrics helpers (no-op if prometheus_client missing)
+def record_ai_stream_zero_chunks(model: str, reason: str = "unknown") -> None:
+    if AI_STREAM_ZERO_CHUNKS is not None:
+        try:
+            AI_STREAM_ZERO_CHUNKS.labels(model=model or "unknown", reason=reason).inc()
+        except Exception:
+            pass
+
+
+def record_ai_stream_fallback(model: str, reason: str = "unknown") -> None:
+    if AI_STREAM_FALLBACK is not None:
+        try:
+            AI_STREAM_FALLBACK.labels(model=model or "unknown", reason=reason).inc()
+        except Exception:
+            pass
+
+
+def observe_ai_stream_duration(seconds: float, model: str = "unknown", outcome: str = "ok") -> None:
+    if AI_STREAM_DURATION is not None:
+        try:
+            AI_STREAM_DURATION.labels(model=model or "unknown", outcome=outcome).observe(max(0.0, float(seconds)))
         except Exception:
             pass
