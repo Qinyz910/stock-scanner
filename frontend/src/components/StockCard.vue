@@ -72,7 +72,7 @@
       </div>
     </div>
     
-    <div class="analysis-date" v-if="stock.analysis_date || stock.risk_tag || stock.confidence !== undefined || stock.fallback_reason">
+    <div class="analysis-date" v-if="stock.analysis_date || stock.risk_tag || stock.confidence !== undefined || stock.ai_provider || stock.ai_model">
       <n-space align="center" :wrap="false">
         <n-tag v-if="stock.analysis_date" type="info" size="small">
           <template #icon>
@@ -86,8 +86,8 @@
         <n-tag v-if="isLowConfidence" type="warning" size="small" round>
           低置信度
         </n-tag>
-        <n-tag v-if="stock.fallback_reason" :type="fallbackReasonTagType" size="small" round>
-          AI降级: {{ fallbackReasonText }}
+        <n-tag v-if="(stock as any).provider_switch_count" type="success" size="small" round>
+          已切换至 {{ (stock as any).ai_provider || '备用提供商' }}<span v-if="(stock as any).ai_model"> / {{ (stock as any).ai_model }}</span>
         </n-tag>
       </n-space>
     </div>

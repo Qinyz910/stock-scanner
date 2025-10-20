@@ -667,18 +667,22 @@ function applyStreamUpdate(data: StreamAnalysisUpdate) {
       stock.analysis = data.analysis;
     }
     
-    // 统一处理AI事件：ai_delta / ai_full
+    // 统一处理AI事件：ai_delta / ai_full / provider_switch
     if (typeof data.event === 'string') {
       if (data.event === 'ai_delta' && typeof data.delta === 'string') {
         stock.analysis = (stock.analysis || '') + data.delta;
         stock.analysisStatus = 'analyzing';
       } else if (data.event === 'ai_full' && typeof data.content === 'string') {
         stock.analysis = data.content;
-        // 如果后端标记了降级原因，保存以便UI展示
-        if (typeof (data as any).fallback_reason === 'string') {
-          (stock as any).fallback_reason = (data as any).fallback_reason as string;
-        }
         stock.analysisStatus = data.status || 'analyzing';
+      } else if (data.event === 'provider_switch') {
+        const to = (data as any).to as { provider?: string; model?: string } | undefined;
+        if (to) {
+          (stock as any).ai_provider = to.provider || (stock as any).ai_provider;
+          (stock as any).ai_model = to.model || (stock as any).ai_model;
+          (stock as any).provider_switch_count = ((stock as any).provider_switch_count || 0) + 1;
+          streamMetrics.statusText = `已切换至 ${to.provider || ''}${to.model ? ' / ' + to.model : ''}`.trim();
+        }
       }
     }
 
