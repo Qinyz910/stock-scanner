@@ -4,6 +4,13 @@
 
 基于 https://github.com/DR-lin-eng/stock-scanner 二次修改，感谢原作者  
 
+## 新增：多AI提供方适配与健康检查
+
+- 通过环境变量 AI_PROVIDER 选择上游提供方（默认 newapi/OpenAI 兼容）：newapi | openai | deepseek | gemini
+- 对应环境变量保持向后兼容：API_URL、API_KEY、API_MODEL、API_TIMEOUT
+- Gemini 官方接口自动映射至 v1beta/models/{model}:generateContent 与 :streamGenerateContent，鉴权使用 x-goog-api-key 头
+- 健康检查：GET /health/ai 返回当前 provider、模型、端点映射与配置状态
+
 ## 功能变更
 
 1. 增加html页面，支持浏览器在线使用  

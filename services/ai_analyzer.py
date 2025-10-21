@@ -61,6 +61,11 @@ class AIAnalyzer:
         self.API_MODEL = custom_api_model or os.getenv('API_MODEL', 'gpt-3.5-turbo')
         self.API_TIMEOUT = int(custom_api_timeout or os.getenv('API_TIMEOUT', 60))
         self.API_MAX_TOKENS = int(os.getenv('API_MAX_TOKENS', '1024'))
+        # Provider 类型（行为适配）：newapi|openai|deepseek|gemini，默认 newapi（OpenAI 兼容）
+        try:
+            self.AI_PROVIDER = (os.getenv('AI_PROVIDER', '') or '').lower().strip() or 'newapi'
+        except Exception:
+            self.AI_PROVIDER = 'newapi'
 
         # Provider标识用于限流/指标（基于URL host）
         try:
@@ -265,8 +270,8 @@ class AIAnalyzer:
                 请基于技术指标和A股市场特点进行分析，给出具体数据支持。
                 """
 
-            # 格式化API URL
-            api_url = APIUtils.format_api_url(self.API_URL)
+            # 格式化API URL（根据 provider 与是否流式选择合适的端点）
+            api_url = APIUtils.format_ai_url(self.API_URL, model=self.API_MODEL, provider=self.AI_PROVIDER, stream=bool(stream))
 
             # 准备请求数据（禁用工具调用，控制生成，避免空输出）
             request_data = {
@@ -279,22 +284,39 @@ class AIAnalyzer:
                 "stream": stream
             }
 
-            # 准备请求头
-            headers_base = {
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {self.API_KEY}",
-                "User-Agent": f"stock-scanner/1.0 (+https://github.com/) model/{self.API_MODEL} provider/{self.PROVIDER}",
-            }
-            headers_stream = dict(headers_base)
-            headers_stream.update({
-                "Accept": "text/event-stream",
-                "Cache-Control": "no-cache",
-                "Connection": "keep-alive",
-            })
-            headers_json = dict(headers_base)
-            headers_json.update({
-                "Accept": "application/json"
-            })
+            # 准备请求头（根据 provider 选择鉴权方式）
+            if (self.AI_PROVIDER or "") == "gemini":
+                headers_base = {
+                    "Content-Type": "application/json",
+                    "x-goog-api-key": f"{self.API_KEY}",
+                    "User-Agent": f"stock-scanner/1.0 (+https://github.com/) model/{self.API_MODEL} provider/{self.PROVIDER}",
+                }
+                headers_stream = dict(headers_base)
+                headers_stream.update({
+                    "Accept": "application/json",
+                    "Cache-Control": "no-cache",
+                    "Connection": "keep-alive",
+                })
+                headers_json = dict(headers_base)
+                headers_json.update({
+                    "Accept": "application/json"
+                })
+            else:
+                headers_base = {
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {self.API_KEY}",
+                    "User-Agent": f"stock-scanner/1.0 (+https://github.com/) model/{self.API_MODEL} provider/{self.PROVIDER}",
+                }
+                headers_stream = dict(headers_base)
+                headers_stream.update({
+                    "Accept": "text/event-stream",
+                    "Cache-Control": "no-cache",
+                    "Connection": "keep-alive",
+                })
+                headers_json = dict(headers_base)
+                headers_json.update({
+                    "Accept": "application/json"
+                })
 
             # 获取当前日期作为分析日期
             analysis_date = datetime.now().strftime("%Y-%m-%d")
@@ -410,7 +432,9 @@ class AIAnalyzer:
                             except Exception:
                                 pass
 
-                        current_url = APIUtils.format_api_url(pv["url"])
+                        current_base_url = pv["url"]
+                        # 依据 AI_PROVIDER 生成请求地址
+                        current_url = APIUtils.format_ai_url(current_base_url, model=current_model, provider=self.AI_PROVIDER, stream=True)
                         current_key = pv["key"]
                         current_model = pv["model"]
                         current_provider_name = pv["provider_name"]
@@ -418,19 +442,35 @@ class AIAnalyzer:
                         limiter = RateLimiter.get(current_provider_name, current_model)
 
                         # Prepare headers per provider
-                        headers_base = {
-                            "Content-Type": "application/json",
-                            "Authorization": f"Bearer {current_key}",
-                            "User-Agent": f"stock-scanner/1.0 (+https://github.com/) model/{current_model} provider/{current_provider_name}",
-                        }
-                        headers_stream = dict(headers_base)
-                        headers_stream.update({
-                            "Accept": "text/event-stream",
-                            "Cache-Control": "no-cache",
-                            "Connection": "keep-alive",
-                        })
-                        headers_json = dict(headers_base)
-                        headers_json.update({"Accept": "application/json"})
+                        if (self.AI_PROVIDER or "") == "gemini":
+                            headers_base = {
+                                "Content-Type": "application/json",
+                                "x-goog-api-key": f"{current_key}",
+                                "User-Agent": f"stock-scanner/1.0 (+https://github.com/) model/{current_model} provider/{current_provider_name}",
+                            }
+                            headers_stream = dict(headers_base)
+                            headers_stream.update({
+                                # Gemini 官方接口通常返回 application/json 流
+                                "Accept": "application/json",
+                                "Cache-Control": "no-cache",
+                                "Connection": "keep-alive",
+                            })
+                            headers_json = dict(headers_base)
+                            headers_json.update({"Accept": "application/json"})
+                        else:
+                            headers_base = {
+                                "Content-Type": "application/json",
+                                "Authorization": f"Bearer {current_key}",
+                                "User-Agent": f"stock-scanner/1.0 (+https://github.com/) model/{current_model} provider/{current_provider_name}",
+                            }
+                            headers_stream = dict(headers_base)
+                            headers_stream.update({
+                                "Accept": "text/event-stream",
+                                "Cache-Control": "no-cache",
+                                "Connection": "keep-alive",
+                            })
+                            headers_json = dict(headers_base)
+                            headers_json.update({"Accept": "application/json"})
 
                         # Request payload per provider
                         request_data = {
@@ -776,6 +816,83 @@ class AIAnalyzer:
 
                     full_content = buffer
 
+                    # 若仍未收到任何内容片段，触发一次非流式补救
+                    if not full_content:
+                        try:
+                            metrics.record_ai_stream_zero_then_fallback(final_provider, final_model)
+                            metrics.record_ai_fallback_non_stream(final_provider, final_model, reason=fallback_reason or "empty_stream")
+                        except Exception:
+                            pass
+                        # 构造非流式地址与载荷
+                        nonstream_url = APIUtils.format_ai_url(current_base_url, model=final_model, provider=self.AI_PROVIDER, stream=False)
+                        fb_attempts = 2
+                        fb_try = 0
+                        analysis_text = ""
+                        while fb_try < fb_attempts and not analysis_text:
+                            payload = dict(request_data)
+                            payload["stream"] = False
+                            try:
+                                await limiter.wait_for_slot()
+                                resp = await client.post(nonstream_url, json=payload, headers=headers_json)
+                                if resp.status_code == 200:
+                                    data = resp.json()
+                                    # OpenAI/newapi 解析
+                                    choices_list = data.get("choices", []) if isinstance(data, dict) else []
+                                    if isinstance(choices_list, list) and len(choices_list) > 0:
+                                        first_choice = choices_list[0] or {}
+                                        message = first_choice.get("message", {})
+                                        if isinstance(message, dict) and message:
+                                            analysis_text = message.get("content", "") or ""
+                                        else:
+                                            analysis_text = first_choice.get("text", "") or ""
+                                    # Gemini 官方解析
+                                    if not analysis_text and isinstance(data, dict):
+                                        cands = data.get("candidates") or []
+                                        if isinstance(cands, list) and cands:
+                                            cand0 = cands[0] or {}
+                                            content_obj = cand0.get("content") or {}
+                                            parts = content_obj.get("parts") or []
+                                            if isinstance(parts, list) and parts:
+                                                analysis_text = parts[0].get("text") or ""
+                                    await limiter.on_success()
+                                    limiter.release()
+                                elif resp.status_code in (429, 500, 502, 503, 504):
+                                    delay = await limiter.on_transient_error(resp.status_code, resp.headers.get("Retry-After") if hasattr(resp, "headers") else None)
+                                    limiter.release()
+                                    await asyncio.sleep(delay)
+                                    fb_try += 1
+                                    continue
+                                else:
+                                    limiter.release()
+                                    break
+                            except httpx.RequestError:
+                                limiter.release()
+                                await asyncio.sleep(RateLimiter.compute_backoff(fb_try))
+                                fb_try += 1
+                                continue
+                        if analysis_text:
+                            try:
+                                metrics.record_ai_fallback_success(final_provider, final_model, reason=fallback_reason or "empty_stream")
+                                metrics.record_ai_fallback_bytes(final_provider, final_model, len(analysis_text.encode("utf-8")))
+                            except Exception:
+                                pass
+                            full_content = analysis_text
+                            outcome = "degraded"
+                            for c in self._chunk_text(analysis_text):
+                                chunks_sent += 1
+                                yield json.dumps({
+                                    "stock_code": stock_code,
+                                    "ai_analysis_chunk": c,
+                                    "event": "ai_delta",
+                                    "delta": c,
+                                    "status": "analyzing"
+                                })
+                        else:
+                            try:
+                                metrics.record_ai_fallback_fail(final_provider, final_model, reason=fallback_reason or "empty_stream")
+                            except Exception:
+                                pass
+
                     # 完整性控制与续写（仅在已有内容时进行）
                     if full_content:
                         missing_sections = self._detect_missing_sections(full_content)
@@ -796,7 +913,8 @@ class AIAnalyzer:
                                     metrics.record_ai_autocontinue_call(final_provider, final_model)
                                 except Exception:
                                     pass
-                                addition = await self._auto_continue_completion(client, current_url, headers_json, limiter, request_data, full_content, missing_sections, round_ix=rounds)
+                                # 非流式续写调用也使用 nonstream_url
+                                addition = await self._auto_continue_completion(client, nonstream_url if 'nonstream_url' in locals() else current_url, headers_json, limiter, request_data, full_content, missing_sections, round_ix=rounds)
                                 addition = self._merge_dedup_addition(full_content, addition)
                                 if addition:
                                     full_content += addition
@@ -830,7 +948,10 @@ class AIAnalyzer:
                         "sections_missing": missing_sections,
                         "sections_ok": len(missing_sections) == 0,
                         "finish_reason": saw_finish_reason or outcome,
-                        "chunks_sent": chunks_sent
+                        "chunks_sent": chunks_sent,
+                        "ai_provider": final_provider,
+                        "ai_model": final_model,
+                        "fallback_reason": fallback_reason if not buffer else None
                     })
                     try:
                         elapsed = time.perf_counter() - start_time
@@ -847,20 +968,35 @@ class AIAnalyzer:
                     top_p = None
                     max_toks = self.API_MAX_TOKENS
                     while attempt < max_attempts and not analysis_text:
-                        payload = dict(request_data)
-                        payload["stream"] = False
-                        payload["temperature"] = temp
-                        if top_p is not None:
-                            payload["top_p"] = top_p
-                        payload["max_tokens"] = max_toks
-                        if attempt >= 1:
-                            try:
-                                msgs = list(payload.get("messages", []))
-                                if msgs and isinstance(msgs[0], dict):
-                                    msgs[0]["content"] = str(msgs[0]["content"]) + "\n请简洁回答（不超过180字）。"
-                                    payload["messages"] = msgs
-                            except Exception:
-                                pass
+                        # 构造非流式载荷（根据 provider 映射参数）
+                        if (self.AI_PROVIDER or "") == "gemini":
+                            payload = {
+                                "contents": [
+                                    {
+                                        "role": "user",
+                                        "parts": [{"text": prompt if attempt == 0 else f"{prompt}\n请简洁回答（不超过180字）。"}],
+                                    }
+                                ],
+                                "generationConfig": {
+                                    "temperature": temp,
+                                    "maxOutputTokens": max_toks,
+                                },
+                            }
+                        else:
+                            payload = dict(request_data)
+                            payload["stream"] = False
+                            payload["temperature"] = temp
+                            if top_p is not None:
+                                payload["top_p"] = top_p
+                            payload["max_tokens"] = max_toks
+                            if attempt >= 1:
+                                try:
+                                    msgs = list(payload.get("messages", []))
+                                    if msgs and isinstance(msgs[0], dict):
+                                        msgs[0]["content"] = str(msgs[0]["content"]) + "\n请简洁回答（不超过180字）。"
+                                        payload["messages"] = msgs
+                                except Exception:
+                                    pass
                         await limiter.wait_for_slot()
                         try:
                             response = await client.post(api_url, json=payload, headers=headers_json)
@@ -875,7 +1011,16 @@ class AIAnalyzer:
                                     else:
                                         analysis_text = first_choice.get("text", "") or ""
                                 else:
+                                    # 兼容其他返回格式（如 Gemini）
                                     analysis_text = response_data.get("content", "") or response_data.get("text", "") or ""
+                                    if not analysis_text and isinstance(response_data, dict):
+                                        cands = response_data.get("candidates") or []
+                                        if isinstance(cands, list) and cands:
+                                            cand0 = cands[0] or {}
+                                            content_obj = cand0.get("content") or {}
+                                            parts = content_obj.get("parts") or []
+                                            if isinstance(parts, list) and parts:
+                                                analysis_text = parts[0].get("text") or ""
                                 await limiter.on_success()
                                 limiter.release()
                                 if analysis_text:
