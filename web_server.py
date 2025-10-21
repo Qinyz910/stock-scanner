@@ -64,6 +64,32 @@ except Exception:
 # Mount v2 API router (features gated within endpoints)
 app.include_router(api_v2_router)
 
+# ---- Health: AI provider ----
+@app.get("/health/ai")
+async def health_ai():
+    provider = (os.getenv("AI_PROVIDER", "") or "").lower().strip() or "newapi"
+    base_url = os.getenv("API_URL", "")
+    model = os.getenv("API_MODEL", "")
+    api_key = os.getenv("API_KEY", "")
+    status = "ok" if base_url and api_key else "missing_credentials"
+    try:
+        stream_url = APIUtils.format_ai_url(base_url, model=model, provider=provider, stream=True)
+        nonstream_url = APIUtils.format_ai_url(base_url, model=model, provider=provider, stream=False)
+    except Exception:
+        stream_url = APIUtils.format_api_url(base_url)
+        nonstream_url = APIUtils.format_api_url(base_url)
+    return {
+        "provider": provider,
+        "configured": bool(base_url) and bool(api_key),
+        "model": model,
+        "base_url": base_url,
+        "endpoints": {
+            "stream": stream_url,
+            "non_stream": nonstream_url,
+        },
+        "status": status,
+    }
+
 # 初始化异步服务
 us_stock_service = USStockServiceAsync()
 fund_service = FundServiceAsync()
@@ -427,25 +453,44 @@ async def test_api_connection(request: TestAPIRequest, username: str = Depends(v
             logger.warning("未提供API Key")
             raise HTTPException(status_code=400, detail="请提供API Key")
             
-        # 构建API URL
-        test_url = APIUtils.format_api_url(api_url)
+        # 构建API URL（根据 AI_PROVIDER 选择端点）
+        provider = (os.getenv("AI_PROVIDER", "") or "").lower().strip() or "newapi"
+        test_url = APIUtils.format_ai_url(api_url, model=(api_model or ""), provider=provider, stream=False)
         logger.debug(f"完整API测试URL: {test_url}")
         
         # 使用异步HTTP客户端发送测试请求
         async with httpx.AsyncClient(timeout=float(api_timeout)) as client:
-            response = await client.post(
-                test_url,
-                headers={
+            # 构造请求头
+            if provider == "gemini":
+                headers = {
+                    "x-goog-api-key": f"{api_key}",
+                    "Content-Type": "application/json",
+                }
+                payload = {
+                    "contents": [
+                        {
+                            "role": "user",
+                            "parts": [{"text": "Hello, this is a test message. Please respond with 'API connection successful'."}],
+                        }
+                    ],
+                    "generationConfig": {"maxOutputTokens": 32},
+                }
+            else:
+                headers = {
                     "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json"
-                },
-                json={
+                    "Content-Type": "application/json",
+                }
+                payload = {
                     "model": api_model or "",
                     "messages": [
                         {"role": "user", "content": "Hello, this is a test message. Please respond with 'API connection successful'."}
                     ],
-                    "max_tokens": 20
+                    "max_tokens": 20,
                 }
+            response = await client.post(
+                test_url,
+                headers=headers,
+                json=payload,
             )
         
         # 检查响应
