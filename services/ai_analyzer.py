@@ -55,17 +55,24 @@ class AIAnalyzer:
         # 加载环境变量
         load_dotenv()
 
-        # 设置API配置
-        self.API_URL = custom_api_url or os.getenv('API_URL')
-        self.API_KEY = custom_api_key or os.getenv('API_KEY')
-        self.API_MODEL = custom_api_model or os.getenv('API_MODEL', 'gpt-3.5-turbo')
-        self.API_TIMEOUT = int(custom_api_timeout or os.getenv('API_TIMEOUT', 60))
-        self.API_MAX_TOKENS = int(os.getenv('API_MAX_TOKENS', '1024'))
+        # 统一解析环境配置（允许自定义参数覆盖）
+        conf = APIUtils.resolve_ai_config()
         # Provider 类型（行为适配）：newapi|openai|deepseek|gemini，默认 newapi（OpenAI 兼容）
         try:
             self.AI_PROVIDER = (os.getenv('AI_PROVIDER', '') or '').lower().strip() or 'newapi'
         except Exception:
             self.AI_PROVIDER = 'newapi'
+
+        # 设置API配置（自定义优先，其次解析结果）
+        self.API_URL = custom_api_url or conf.get('base_url')
+        if self.AI_PROVIDER == 'gemini':
+            self.API_KEY = custom_api_key or os.getenv('GEMINI_API_KEY') or os.getenv('AI_API_KEY') or os.getenv('API_KEY')
+        else:
+            self.API_KEY = custom_api_key or os.getenv('AI_API_KEY') or os.getenv('API_KEY')
+        # 模型不设置默认值，保持环境解析与自定义为准
+        self.API_MODEL = custom_api_model or conf.get('model') or os.getenv('API_MODEL')
+        self.API_TIMEOUT = int(custom_api_timeout or os.getenv('API_TIMEOUT', 60))
+        self.API_MAX_TOKENS = int(os.getenv('API_MAX_TOKENS', '1024'))
 
         # Provider标识用于限流/指标（基于URL host）
         try:
@@ -142,6 +149,10 @@ class AIAnalyzer:
         try:
             start_time = time.perf_counter()
             logger.info(f"开始AI分析 {stock_code}, 流式模式: {stream}")
+
+            # 基础配置校验（避免 NameError 等因未初始化变量导致的错误）
+            if not self.API_URL or not self.API_KEY or not self.API_MODEL:
+                raise ValueError(f"AI 配置不完整: provider={self.AI_PROVIDER}, model={self.API_MODEL}, base_url={'set' if self.API_URL else 'missing'}, api_key_present={bool(self.API_KEY)}")
 
             # 提取关键技术指标
             if df is None or df.empty:
@@ -409,6 +420,7 @@ class AIAnalyzer:
                     switch_reason = None
 
                     # Iterate providers
+                    current_model = self.API_MODEL  # 明确初始化，避免未赋值引用
                     for idx, pv in enumerate(providers):
                         if idx > 0:
                             # Announce provider switch before starting
@@ -433,11 +445,11 @@ class AIAnalyzer:
                                 pass
 
                         current_base_url = pv["url"]
+                        current_model = pv["model"]
+                        current_key = pv["key"]
+                        current_provider_name = pv["provider_name"]
                         # 依据 AI_PROVIDER 生成请求地址
                         current_url = APIUtils.format_ai_url(current_base_url, model=current_model, provider=self.AI_PROVIDER, stream=True)
-                        current_key = pv["key"]
-                        current_model = pv["model"]
-                        current_provider_name = pv["provider_name"]
                         # Recompute limiter per provider/model
                         limiter = RateLimiter.get(current_provider_name, current_model)
 
