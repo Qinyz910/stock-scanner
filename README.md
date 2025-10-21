@@ -11,6 +11,25 @@
 - Gemini 官方接口自动映射至 v1beta/models/{model}:generateContent 与 :streamGenerateContent，鉴权使用 x-goog-api-key 头
 - 健康检查：GET /health/ai 返回当前 provider、模型、端点映射与配置状态
 
+### 模型与提供方解析（resolve_ai_config）
+
+统一从环境变量解析 provider/model/base_url/api_key，并提供合理的回退策略：
+
+- 通用（newapi/openai/deepseek）
+  - 模型：优先 AI_MODEL，其次 API_MODEL
+  - 基址：优先 AI_BASE_URL，其次 API_URL（仍兼容旧变量名）
+  - 密钥：优先 AI_API_KEY，其次 API_KEY
+- Gemini（官方接口）
+  - 模型：优先 GEMINI_MODEL，其次 AI_MODEL，再次 API_MODEL
+  - 基址：优先 GEMINI_BASE_URL，其次 AI_BASE_URL/API_URL，若均未设置则使用 https://generativelanguage.googleapis.com
+  - 密钥：优先 GEMINI_API_KEY，其次 AI_API_KEY/API_KEY
+- 回退策略：当 provider=gemini 且未设置 GEMINI_MODEL 时，会回退使用通用的 AI_MODEL（如果存在）。
+
+健康检查会在启动期进行一次配置校验，并在 /health/ai 返回：
+- provider、model、base_url（不回显密钥）
+- endpoints.stream / endpoints.non_stream
+- status: ok|error 以及 errors 列表（如 model_missing、base_url_missing、api_key_missing）
+
 ## 功能变更
 
 1. 增加html页面，支持浏览器在线使用  

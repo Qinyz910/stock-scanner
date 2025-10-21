@@ -65,13 +65,25 @@ except Exception:
 app.include_router(api_v2_router)
 
 # ---- Health: AI provider ----
+AI_STARTUP_CONF = None
+try:
+    AI_STARTUP_CONF = APIUtils.resolve_ai_config()
+    if AI_STARTUP_CONF.get('ok'):
+        logger.info(f"AI 配置检测通过: provider={AI_STARTUP_CONF.get('provider')}, model={AI_STARTUP_CONF.get('model')}, base_url={AI_STARTUP_CONF.get('base_url')}")
+    else:
+        logger.error(f"AI 配置缺失: provider={AI_STARTUP_CONF.get('provider')}, model={AI_STARTUP_CONF.get('model')}, base_url={'set' if AI_STARTUP_CONF.get('base_url') else 'missing'}, errors={AI_STARTUP_CONF.get('errors')}")
+except Exception as _ex:
+    logger.exception(_ex)
+
+
 @app.get("/health/ai")
 async def health_ai():
-    provider = (os.getenv("AI_PROVIDER", "") or "").lower().strip() or "newapi"
-    base_url = os.getenv("API_URL", "")
-    model = os.getenv("API_MODEL", "")
-    api_key = os.getenv("API_KEY", "")
-    status = "ok" if base_url and api_key else "missing_credentials"
+    conf = APIUtils.resolve_ai_config()
+    provider = conf.get('provider')
+    base_url = conf.get('base_url') or ""
+    model = conf.get('model') or ""
+    ok = conf.get('ok')
+    errors = conf.get('errors')
     try:
         stream_url = APIUtils.format_ai_url(base_url, model=model, provider=provider, stream=True)
         nonstream_url = APIUtils.format_ai_url(base_url, model=model, provider=provider, stream=False)
@@ -80,14 +92,15 @@ async def health_ai():
         nonstream_url = APIUtils.format_api_url(base_url)
     return {
         "provider": provider,
-        "configured": bool(base_url) and bool(api_key),
+        "configured": bool(base_url) and bool(conf.get('api_key_present')),
         "model": model,
         "base_url": base_url,
         "endpoints": {
             "stream": stream_url,
             "non_stream": nonstream_url,
         },
-        "status": status,
+        "status": "ok" if ok else "error",
+        "errors": errors,
     }
 
 # 初始化异步服务
