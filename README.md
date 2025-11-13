@@ -231,3 +231,73 @@ Observability:
 
 Caching:
 - Cache wrapper utils.cache.Cache auto-selects Redis or in-memory backend, provides decorators, a health probe, and Prometheus hit/miss metrics.
+
+## Point-in-Time Data Consistency (PIT)
+
+**消除看未来数据与时间错配，确保扫描/评分与回测/研究一致。**
+
+The system now implements comprehensive point-in-time (PIT) data consistency to prevent look-ahead bias and ensure alignment between backtesting and online analysis.
+
+### Key Features
+
+1. **Timeline Correction**: All data retrieval functions accept an `as_of` parameter to enforce strict time cutoffs
+2. **Snapshot Versioning**: Factor snapshots track `as_of` (validity time) and `data_as_of` (data timestamp) metadata
+3. **Validation Framework**: Utilities to detect and prevent look-ahead bias in analysis
+4. **Consistent Paths**: Backtest and online scoring use identical data access patterns
+
+### Usage Example
+
+```python
+from datetime import datetime
+from services.factor_scoring import FactorScoringEngine, FactorDef
+from services.quant.backtest import run_backtest, BacktestParams
+
+# Use same as_of time for consistency
+as_of = datetime(2023, 6, 30, 15, 0, 0)
+
+# Online scoring
+engine = FactorScoringEngine()
+result = await engine.score(
+    symbols=["600000", "000001"],
+    factors=[FactorDef(id="momentum", weight=1.0)],
+    as_of=as_of,  # Only uses data available by this time
+)
+
+# Backtest with same constraint
+bt_result = run_backtest(
+    symbols=["600000"],
+    market_type="A",
+    params=BacktestParams(start_date="20230101", end_date="20230630"),
+    as_of=as_of,  # Same cutoff ensures consistency
+)
+```
+
+### Validation
+
+```python
+from utils.pit_validation import PITValidator
+
+# Validate no future data leakage
+PITValidator.assert_no_future_data(df, as_of=datetime(2023, 6, 30))
+
+# Generate data quality report
+report = PITValidator.generate_data_quality_report(df, as_of, symbol="600000")
+```
+
+### Documentation
+
+- **Full Guide**: [docs/PIT_CONSISTENCY.md](docs/PIT_CONSISTENCY.md)
+- **Tests**: `tests/test_pit_consistency.py`
+- **Example**: `python examples/pit_consistency_example.py`
+
+### Database Schema Updates
+
+The `factor_snapshots` table now includes temporal metadata:
+
+```sql
+CREATE TABLE factor_snapshots (
+    ...existing fields...
+    as_of TIMESTAMP,        -- When snapshot becomes valid
+    data_as_of TIMESTAMP    -- Latest data timestamp used
+)
+```

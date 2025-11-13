@@ -1,7 +1,7 @@
 import os
 import uuid
 from datetime import datetime
-from typing import Optional
+from typing import List, Optional
 
 import pandas as pd
 
@@ -25,7 +25,7 @@ class SnapshotStore:
             import duckdb  # type: ignore
 
             self._duckdb = duckdb.connect(self.duckdb_path)
-            # Create table upfront
+            # Create table upfront with as_of and data_as_of for point-in-time consistency
             self._duckdb.execute(
                 """
                 CREATE TABLE IF NOT EXISTS factor_snapshots (
@@ -39,7 +39,9 @@ class SnapshotStore:
                     weight DOUBLE,
                     contrib DOUBLE,
                     window INTEGER,
-                    market_type VARCHAR
+                    market_type VARCHAR,
+                    as_of TIMESTAMP,
+                    data_as_of TIMESTAMP
                 )
                 """
             )
@@ -51,7 +53,7 @@ class SnapshotStore:
     def save(self, df: pd.DataFrame) -> None:
         """
         Save snapshot records.
-        df must include columns: ts, request_id, symbol, factor_id, factor_name, value, z, weight, contrib, window, market_type
+        df must include columns: ts, request_id, symbol, factor_id, factor_name, value, z, weight, contrib, window, market_type, as_of, data_as_of
         """
         if df is None or df.empty:
             return
@@ -62,7 +64,7 @@ class SnapshotStore:
                 self._duckdb.execute(
                     """
                     INSERT INTO factor_snapshots
-                    SELECT ts, request_id, symbol, factor_id, factor_name, value, z, weight, contrib, window, market_type
+                    SELECT ts, request_id, symbol, factor_id, factor_name, value, z, weight, contrib, window, market_type, as_of, data_as_of
                     FROM tmp_df
                     """
                 )
@@ -81,3 +83,35 @@ class SnapshotStore:
             logger.info("Saved factor snapshot CSV at %s", file_path)
         except Exception as e:
             logger.error("Failed to save snapshot CSV: %s", str(e))
+
+    def query(self, as_of: datetime, symbols: Optional[List[str]] = None, factor_ids: Optional[List[str]] = None) -> Optional[pd.DataFrame]:
+        """
+        Query snapshots as of a given time.
+        Returns the most recent snapshot for each symbol/factor where as_of <= specified time.
+        """
+        if self._duckdb is None:
+            logger.warning("DuckDB not available, cannot query snapshots")
+            return None
+
+        try:
+            where_clauses = [f"as_of <= '{as_of.isoformat()}'"]
+            if symbols:
+                symbol_list = "', '".join(symbols)
+                where_clauses.append(f"symbol IN ('{symbol_list}')")
+            if factor_ids:
+                factor_list = "', '".join(factor_ids)
+                where_clauses.append(f"factor_id IN ('{factor_list}')")
+            
+            where_clause = " AND ".join(where_clauses)
+            
+            query = f"""
+                SELECT * FROM factor_snapshots
+                WHERE {where_clause}
+                ORDER BY as_of DESC, ts DESC
+            """
+            
+            result = self._duckdb.execute(query).fetchdf()
+            return result
+        except Exception as e:
+            logger.error("Failed to query snapshots: %s", str(e))
+            return None
