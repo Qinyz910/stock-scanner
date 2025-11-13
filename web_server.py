@@ -13,6 +13,15 @@ import os
 import httpx
 from utils.logger import get_logger
 from utils.api_utils import APIUtils
+from utils.error_handlers import register_error_handlers, ErrorResponse
+from utils.exceptions import (
+    AppException,
+    UnauthorizedError,
+    ValidationError as AppValidationError,
+    NotFoundError,
+    UpstreamError,
+    InternalError,
+)
 from dotenv import load_dotenv
 import uvicorn
 import json
@@ -42,8 +51,17 @@ REQUIRE_LOGIN = bool(LOGIN_PASSWORD.strip())
 app = FastAPI(
     title="Stock Scanner API",
     description="异步股票分析API",
-    version="1.0.0"
+    version="1.0.0",
+    openapi_tags=[
+        {
+            "name": "Errors",
+            "description": "Error response definitions for API documentation",
+        }
+    ]
 )
+
+# Register unified error handlers
+register_error_handlers(app)
 
 # 添加CORS中间件
 app.add_middleware(
@@ -63,6 +81,139 @@ except Exception:
 
 # Mount v2 API router (features gated within endpoints)
 app.include_router(api_v2_router)
+
+
+# Custom OpenAPI schema configuration for error responses
+def custom_openapi():
+    """Customize OpenAPI schema to include error response components."""
+    if app.openapi_schema:
+        return app.openapi_schema
+    
+    openapi_schema = app.openapi()
+    
+    # Add component schemas for error responses
+    if "components" not in openapi_schema:
+        openapi_schema["components"] = {}
+    if "schemas" not in openapi_schema["components"]:
+        openapi_schema["components"]["schemas"] = {}
+    
+    openapi_schema["components"]["schemas"]["ErrorResponse"] = {
+        "type": "object",
+        "properties": {
+            "code": {
+                "type": "string",
+                "description": "Error code (e.g., VALIDATION_ERROR, UNAUTHORIZED, NOT_FOUND, etc.)",
+                "example": "VALIDATION_ERROR"
+            },
+            "message": {
+                "type": "string",
+                "description": "Human-readable error message",
+                "example": "Request validation failed"
+            },
+            "details": {
+                "type": "object",
+                "description": "Additional error details",
+                "example": {"errors": [{"field": "email", "type": "value_error", "message": "invalid email format"}]}
+            },
+            "traceId": {
+                "type": "string",
+                "description": "Trace ID for error tracking and debugging",
+                "example": "550e8400-e29b-41d4-a716-446655440000"
+            }
+        },
+        "required": ["code", "message"]
+    }
+    
+    # Add error response definitions
+    openapi_schema["components"]["schemas"]["ValidationErrorResponse"] = {
+        "allOf": [
+            {"$ref": "#/components/schemas/ErrorResponse"},
+            {
+                "type": "object",
+                "properties": {
+                    "code": {
+                        "enum": ["VALIDATION_ERROR"]
+                    }
+                }
+            }
+        ]
+    }
+    
+    openapi_schema["components"]["schemas"]["UnauthorizedErrorResponse"] = {
+        "allOf": [
+            {"$ref": "#/components/schemas/ErrorResponse"},
+            {
+                "type": "object",
+                "properties": {
+                    "code": {
+                        "enum": ["UNAUTHORIZED"]
+                    }
+                }
+            }
+        ]
+    }
+    
+    openapi_schema["components"]["schemas"]["ForbiddenErrorResponse"] = {
+        "allOf": [
+            {"$ref": "#/components/schemas/ErrorResponse"},
+            {
+                "type": "object",
+                "properties": {
+                    "code": {
+                        "enum": ["FORBIDDEN"]
+                    }
+                }
+            }
+        ]
+    }
+    
+    openapi_schema["components"]["schemas"]["NotFoundErrorResponse"] = {
+        "allOf": [
+            {"$ref": "#/components/schemas/ErrorResponse"},
+            {
+                "type": "object",
+                "properties": {
+                    "code": {
+                        "enum": ["NOT_FOUND"]
+                    }
+                }
+            }
+        ]
+    }
+    
+    openapi_schema["components"]["schemas"]["UpstreamErrorResponse"] = {
+        "allOf": [
+            {"$ref": "#/components/schemas/ErrorResponse"},
+            {
+                "type": "object",
+                "properties": {
+                    "code": {
+                        "enum": ["UPSTREAM_ERROR"]
+                    }
+                }
+            }
+        ]
+    }
+    
+    openapi_schema["components"]["schemas"]["InternalErrorResponse"] = {
+        "allOf": [
+            {"$ref": "#/components/schemas/ErrorResponse"},
+            {
+                "type": "object",
+                "properties": {
+                    "code": {
+                        "enum": ["INTERNAL_ERROR"]
+                    }
+                }
+            }
+        ]
+    }
+    
+    app.openapi_schema = openapi_schema
+    return app.openapi_schema
+
+
+app.openapi = custom_openapi
 
 # ---- Health: AI provider ----
 AI_STARTUP_CONF = None
@@ -192,24 +343,21 @@ async def verify_token(token: Optional[str] = Depends(optional_oauth2_scheme)):
     if token is None and not REQUIRE_LOGIN:
         return "guest"
         
-    credentials_exception = HTTPException(
-        status_code=401,
-        detail="无效的认证凭据",
-        headers={"WWW-Authenticate": "Bearer"},
-    )
-    
     # 如果需要登录但没有token，抛出异常
     if token is None:
-        raise credentials_exception
+        raise UnauthorizedError("Invalid authentication credentials")
         
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         username: str = payload.get("sub")
         if username is None:
-            raise credentials_exception
+            raise UnauthorizedError("Invalid authentication token")
         return username
-    except JWTError:
-        raise credentials_exception
+    except JWTError as e:
+        raise UnauthorizedError(
+            "Invalid or expired authentication token",
+            original_error=e
+        )
 
 # 用户登录接口
 @app.post("/api/login")
@@ -222,7 +370,7 @@ async def login(request: LoginRequest):
         
     if request.password != LOGIN_PASSWORD:
         logger.warning("登录失败：密码错误")
-        raise HTTPException(status_code=401, detail="密码错误")
+        raise UnauthorizedError("Invalid password")
     
     # 创建访问令牌
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
@@ -284,7 +432,7 @@ async def analyze(request: AnalyzeRequest, username: str = Depends(verify_token)
         
         if not stock_codes:
             logger.warning("未提供股票代码")
-            raise HTTPException(status_code=400, detail="请输入代码")
+            raise AppValidationError("Stock codes are required")
         
         # 定义流式生成器
         async def generate_stream():
@@ -332,21 +480,24 @@ async def analyze(request: AnalyzeRequest, username: str = Depends(verify_token)
         logger.info("成功创建流式响应生成器")
         return StreamingResponse(generate_stream(), media_type='application/json')
             
+    except AppValidationError:
+        raise
     except Exception as e:
-        error_msg = f"分析时出错: {str(e)}"
-        logger.error(error_msg)
         logger.exception(e)
-        raise HTTPException(status_code=500, detail=error_msg)
+        raise InternalError(
+            "Error occurred during analysis",
+            original_error=e
+        )
 
 # 因子评分 API
 @app.post("/api/scores")
 async def compute_scores(request: ScoresRequest, username: str = Depends(verify_token)):
     try:
         if not request.symbols:
-            raise HTTPException(status_code=400, detail="请输入代码")
+            raise AppValidationError("Stock symbols are required")
         symbols = list(dict.fromkeys([s.strip() for s in request.symbols]))
         if not request.factors:
-            raise HTTPException(status_code=400, detail="请提供因子列表")
+            raise AppValidationError("Factors list is required")
 
         factor_defs: List[FactorDef] = []
         for f in request.factors:
@@ -379,71 +530,94 @@ async def compute_scores(request: ScoresRequest, username: str = Depends(verify_
             page_size=request.page_size,
         )
         return result
-    except HTTPException:
+    except AppException:
         raise
     except Exception as e:
-        logger.error(f"计算因子评分时出错: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception(e)
+        raise InternalError(
+            "Error occurred while computing factor scores",
+            original_error=e
+        )
 
 # 搜索美股代码
 @app.get("/api/search_us_stocks")
 async def search_us_stocks(keyword: str = "", username: str = Depends(verify_token)):
     try:
         if not keyword:
-            raise HTTPException(status_code=400, detail="请输入搜索关键词")
+            raise AppValidationError("Search keyword is required")
         
         # 直接使用异步服务的异步方法
         results = await us_stock_service.search_us_stocks(keyword)
         return {"results": results}
         
+    except AppException:
+        raise
     except Exception as e:
-        logger.error(f"搜索美股代码时出错: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception(e)
+        raise InternalError(
+            "Error occurred while searching US stocks",
+            original_error=e
+        )
 
 # 搜索基金代码
 @app.get("/api/search_funds")
 async def search_funds(keyword: str = "", market_type: str = "", username: str = Depends(verify_token)):
     try:
         if not keyword:
-            raise HTTPException(status_code=400, detail="请输入搜索关键词")
+            raise AppValidationError("Search keyword is required")
         
         # 直接使用异步服务的异步方法
         results = await fund_service.search_funds(keyword, market_type)
         return {"results": results}
         
+    except AppException:
+        raise
     except Exception as e:
-        logger.error(f"搜索基金代码时出错: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception(e)
+        raise InternalError(
+            "Error occurred while searching funds",
+            original_error=e
+        )
 
 # 获取美股详情
 @app.get("/api/us_stock_detail/{symbol}")
 async def get_us_stock_detail(symbol: str, username: str = Depends(verify_token)):
     try:
         if not symbol:
-            raise HTTPException(status_code=400, detail="请提供股票代码")
+            raise AppValidationError("Stock symbol is required")
         
         # 使用异步服务获取详情
         detail = await us_stock_service.get_us_stock_detail(symbol)
         return detail
         
+    except AppException:
+        raise
     except Exception as e:
-        logger.error(f"获取美股详情时出错: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception(e)
+        raise InternalError(
+            "Error occurred while fetching US stock details",
+            original_error=e
+        )
 
 # 获取基金详情
 @app.get("/api/fund_detail/{symbol}")
 async def get_fund_detail(symbol: str, market_type: str = "ETF", username: str = Depends(verify_token)):
     try:
         if not symbol:
-            raise HTTPException(status_code=400, detail="请提供基金代码")
+            raise AppValidationError("Fund symbol is required")
         
         # 使用异步服务获取详情
         detail = await fund_service.get_fund_detail(symbol, market_type)
         return detail
         
+    except AppException:
+        raise
     except Exception as e:
-        logger.error(f"获取基金详情时出错: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception(e)
+        raise InternalError(
+            "Error occurred while fetching fund details",
+            original_error=e
+        )
 
 # 测试API连接
 @app.post("/api/test_api_connection")
@@ -460,11 +634,11 @@ async def test_api_connection(request: TestAPIRequest, username: str = Depends(v
         
         if not api_url:
             logger.warning("未提供API URL")
-            raise HTTPException(status_code=400, detail="请提供API URL")
-            
+            raise AppValidationError("API URL is required")
+
         if not api_key:
             logger.warning("未提供API Key")
-            raise HTTPException(status_code=400, detail="请提供API Key")
+            raise AppValidationError("API Key is required")
             
         # 构建API URL（根据 AI_PROVIDER 选择端点）
         provider = (os.getenv("AI_PROVIDER", "") or "").lower().strip() or "newapi"
@@ -509,28 +683,29 @@ async def test_api_connection(request: TestAPIRequest, username: str = Depends(v
         # 检查响应
         if response.status_code == 200:
             logger.info(f"API 连接测试成功: {response.status_code}")
-            return {"success": True, "message": "API 连接测试成功"}
+            return {"success": True, "message": "API connection successful"}
         else:
             error_data = response.json()
-            error_message = error_data.get('error', {}).get('message', '未知错误')
+            error_message = error_data.get('error', {}).get('message', 'Unknown error')
             logger.warning(f"API连接测试失败: {response.status_code} - {error_message}")
-            return JSONResponse(
-                status_code=400,
-                content={"success": False, "message": f"API 连接测试失败: {error_message}", "status_code": response.status_code}
+            raise UpstreamError(
+                f"API connection test failed: {error_message}",
+                details={"status_code": response.status_code}
             )
             
+    except AppValidationError:
+        raise
     except httpx.RequestError as e:
         logger.error(f"API 连接请求错误: {str(e)}")
-        return JSONResponse(
-            status_code=400,
-            content={"success": False, "message": f"请求错误: {str(e)}"}
+        raise UpstreamError(
+            "API connection request failed",
+            original_error=e
         )
     except Exception as e:
-        logger.error(f"测试 API 连接时出错: {str(e)}")
         logger.exception(e)
-        return JSONResponse(
-            status_code=500,
-            content={"success": False, "message": f"API 测试连接时出错: {str(e)}"}
+        raise InternalError(
+            "Error occurred while testing API connection",
+            original_error=e
         )
 
 # 检查是否需要登录

@@ -5,7 +5,7 @@ import json
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -15,6 +15,7 @@ from services.quant.factors import REGISTRY as FACTORS_REG
 from services.quant.backtest import run_backtest, BacktestParams
 from utils.task_queue import GLOBAL_TASK_QUEUE
 from services.quant.reco import recommend as reco_recommend
+from utils.exceptions import ValidationError as AppValidationError, NotFoundError
 
 api_v2_router = APIRouter(prefix="/api/v2", tags=["v2"])
 
@@ -80,9 +81,9 @@ async def list_factors():
 @api_v2_router.post("/factors/compute")
 async def factors_compute(req: FactorComputeRequest):
     if not req.symbols:
-        raise HTTPException(status_code=400, detail="symbols required")
+        raise AppValidationError("Symbols are required")
     if not req.factors:
-        raise HTTPException(status_code=400, detail="factors required")
+        raise AppValidationError("Factors are required")
 
     # Cache key based on payload
     payload = req.model_dump()
@@ -150,7 +151,7 @@ async def backtest_run(req: BacktestRunRequest):
 async def backtest_status(job_id: str):
     job = GLOBAL_TASK_QUEUE.get(job_id)
     if job is None:
-        raise HTTPException(status_code=404, detail="job not found")
+        raise NotFoundError("Backtest job not found")
     return job.to_dict()
 
 
@@ -183,7 +184,7 @@ async def backtest_stream(job_id: str):
 async def portfolio_optimize(req: PortfolioOptimizeRequest):
     # simple equal weight or volatility inverse placeholder
     if not req.symbols:
-        raise HTTPException(status_code=400, detail="symbols required")
+        raise AppValidationError("Symbols are required")
     weights = {s: 1.0 / len(req.symbols) for s in req.symbols}
     return {"weights": weights, "method": req.method}
 
@@ -215,7 +216,7 @@ async def ml_predict(req: MLPredictRequest):
 async def recommend(req: RecommendRequest):
     symbols = req.symbols
     if not symbols:
-        raise HTTPException(status_code=400, detail="symbols required")
+        raise AppValidationError("Symbols are required")
     scores = req.scores or {s: 0.0 for s in symbols}
     recos = reco_recommend(symbols, scores, risk_tag=None, risk_appetite=req.risk_appetite)
     return {"results": [r.__dict__ for r in recos]}
