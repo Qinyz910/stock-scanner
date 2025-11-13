@@ -19,7 +19,8 @@ class StockDataProvider:
     
     async def get_stock_data(self, stock_code: str, market_type: str = 'A', 
                             start_date: Optional[str] = None, 
-                            end_date: Optional[str] = None) -> pd.DataFrame:
+                            end_date: Optional[str] = None,
+                            as_of: Optional[datetime] = None) -> pd.DataFrame:
         """
         异步获取股票或基金数据
         
@@ -28,6 +29,7 @@ class StockDataProvider:
             market_type: 市场类型，默认为'A'股
             start_date: 开始日期，格式YYYYMMDD，默认为一年前
             end_date: 结束日期，格式YYYYMMDD，默认为今天
+            as_of: 时间截断点，仅返回该时间之前的数据，避免未来数据泄露
             
         Returns:
             包含历史数据的DataFrame
@@ -38,12 +40,14 @@ class StockDataProvider:
             stock_code, 
             market_type, 
             start_date, 
-            end_date
+            end_date,
+            as_of
         )
     
     def _get_stock_data_sync(self, stock_code: str, market_type: str = 'A', 
                            start_date: Optional[str] = None, 
-                           end_date: Optional[str] = None) -> pd.DataFrame:
+                           end_date: Optional[str] = None,
+                           as_of: Optional[datetime] = None) -> pd.DataFrame:
         """
         同步获取股票数据的实现
         将被异步方法调用
@@ -246,6 +250,13 @@ class StockDataProvider:
                 
             # 确保按日期升序排序
             df.sort_index(inplace=True)
+            
+            # Point-in-time truncation: only include data available as of the specified time
+            if as_of is not None:
+                as_of_date = pd.to_datetime(as_of)
+                if isinstance(df.index, pd.DatetimeIndex):
+                    df = df[df.index <= as_of_date]
+                    logger.debug(f"应用时间截断 as_of={as_of_date}, 剩余数据点数: {len(df)}")
                 
             logger.info(f"成功获取{market_type}数据 {stock_code}, 数据点数: {len(df)}")
             return df
@@ -264,7 +275,8 @@ class StockDataProvider:
                                      market_type: str = 'A',
                                      start_date: Optional[str] = None, 
                                      end_date: Optional[str] = None,
-                                     max_concurrency: int = 5) -> Dict[str, pd.DataFrame]:
+                                     max_concurrency: int = 5,
+                                     as_of: Optional[datetime] = None) -> Dict[str, pd.DataFrame]:
         """
         异步批量获取多只股票数据
         
@@ -274,6 +286,7 @@ class StockDataProvider:
             start_date: 开始日期，格式YYYYMMDD
             end_date: 结束日期，格式YYYYMMDD
             max_concurrency: 最大并发数，默认为5
+            as_of: 时间截断点，仅返回该时间之前的数据
             
         Returns:
             字典，键为股票代码，值为对应的DataFrame
@@ -284,7 +297,7 @@ class StockDataProvider:
         async def get_with_semaphore(code):
             async with semaphore:
                 try:
-                    return code, await self.get_stock_data(code, market_type, start_date, end_date)
+                    return code, await self.get_stock_data(code, market_type, start_date, end_date, as_of)
                 except Exception as e:
                     logger.error(f"获取股票 {code} 数据时出错: {str(e)}")
                     return code, None

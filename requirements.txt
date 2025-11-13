@@ -28,6 +28,8 @@ seaborn==0.13.2
 
 # 开发和调试工具
 ipython>=7.34.0
+pytest==8.3.3
+pytest-asyncio==0.24.0
 
 # 其他依赖
 beautifulsoup4==4.12.3

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -38,14 +39,21 @@ def _to_weights(symbols: List[str], method: str = "equal", data: Dict[str, pd.Da
     return {s: 1.0 / n for s in symbols}
 
 
-def run_backtest(symbols: List[str], market_type: str, params: BacktestParams, provider: Optional[StockDataProvider] = None, progress_cb=None) -> dict:
+def run_backtest(symbols: List[str], market_type: str, params: BacktestParams, provider: Optional[StockDataProvider] = None, progress_cb=None, as_of: Optional[datetime] = None) -> dict:
+    """
+    Run backtest with point-in-time data consistency.
+    
+    Args:
+        as_of: Point-in-time timestamp - ensures data is truncated to avoid look-ahead bias
+    """
     provider = provider or StockDataProvider()
     progress_cb = progress_cb or (lambda pct, msg="": None)
 
-    # fetch data
+    # fetch data with point-in-time constraint to match online scoring
     progress_cb(5, "fetching data")
     import asyncio
-    data_map = asyncio.run(provider.get_multiple_stocks_data(symbols, market_type=market_type, start_date=params.start_date, end_date=params.end_date, max_concurrency=8))
+    from datetime import datetime as dt
+    data_map = asyncio.run(provider.get_multiple_stocks_data(symbols, market_type=market_type, start_date=params.start_date, end_date=params.end_date, max_concurrency=8, as_of=as_of))
 
     # align dates
     progress_cb(20, "aligning data")

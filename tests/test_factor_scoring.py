@@ -51,7 +51,7 @@ def test_factor_impls():
 def test_contribution_decomposition_end_to_end():
     # Prepare dummy data provider
     class DummyProvider:
-        async def get_multiple_stocks_data(self, stock_codes, market_type, start_date, end_date, max_concurrency=10):
+        async def get_multiple_stocks_data(self, stock_codes, market_type, start_date, end_date, max_concurrency=10, as_of=None):
             base = [10, 10, 10, 10, 10, 10, 10, 10, 10]
             data = {}
             for i, sym in enumerate(stock_codes):

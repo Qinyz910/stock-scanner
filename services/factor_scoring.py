@@ -162,9 +162,13 @@ class FactorScoringEngine:
         page: int = 1,
         page_size: int = 100,
         cache_ttl: int = 300,
+        as_of: Optional[datetime] = None,
     ) -> Dict[str, Any]:
         """
         Compute scores and contributions for a list of symbols.
+        
+        Args:
+            as_of: Point-in-time timestamp - only use data available at this time to avoid look-ahead bias
         """
         # canonical request for caching
         cache_key = self._build_cache_key(
@@ -177,19 +181,21 @@ class FactorScoringEngine:
             industries=industries,
             page=page,
             page_size=page_size,
+            as_of=as_of,
         )
 
         cached = self.cache.get(cache_key)
         if cached is not None:
             return cached
 
-        # fetch data in batch
+        # fetch data in batch with point-in-time constraint
         data_map = await self.data_provider.get_multiple_stocks_data(
             stock_codes=symbols,
             market_type=market_type,
             start_date=start_date,
             end_date=end_date,
             max_concurrency=10,
+            as_of=as_of,
         )
 
         # compute cross-sectional factor values per factor id
@@ -388,7 +394,7 @@ class FactorScoringEngine:
             "results": paged_results,
         }
 
-        # persist snapshot (one row per factor per symbol)
+        # persist snapshot (one row per factor per symbol) with point-in-time metadata
         try:
             self._persist_snapshot(
                 factors=factors,
@@ -396,6 +402,7 @@ class FactorScoringEngine:
                 symbols=symbols,
                 market_type=market_type,
                 window=window,
+                as_of=as_of,
             )
         except Exception as e:
             logger.warning("Snapshot persistence failed: %s", str(e))
@@ -412,9 +419,15 @@ class FactorScoringEngine:
         symbols: List[str],
         market_type: str,
         window: int,
+        as_of: Optional[datetime] = None,
     ) -> None:
         ts = pd.Timestamp.utcnow()
         request_id = hashlib.md5((str(ts.value) + json.dumps([f.id for f in factors])).encode("utf-8")).hexdigest()
+        
+        # as_of: when this snapshot becomes valid (user's specified time or now)
+        # data_as_of: the latest data timestamp used in computation
+        snapshot_as_of = pd.Timestamp(as_of) if as_of else ts
+        data_as_of = snapshot_as_of  # For now, assume data is as fresh as requested
 
         rows = []
         for f in factors:
@@ -435,6 +448,8 @@ class FactorScoringEngine:
                     "contrib": float(f.weight) * z,
                     "window": int(window),
                     "market_type": market_type,
+                    "as_of": snapshot_as_of,
+                    "data_as_of": data_as_of,
                 })
         df = pd.DataFrame(rows)
         self.snapshot_store.save(df)
@@ -450,6 +465,7 @@ class FactorScoringEngine:
         industries: Optional[Dict[str, str]],
         page: int,
         page_size: int,
+        as_of: Optional[datetime] = None,
     ) -> str:
         payload = {
             "symbols": symbols,
@@ -476,6 +492,7 @@ class FactorScoringEngine:
             "industries": industries,
             "page": page,
             "page_size": page_size,
+            "as_of": as_of.isoformat() if as_of else None,
         }
         m = hashlib.md5(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
         return m
