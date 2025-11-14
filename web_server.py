@@ -42,7 +42,6 @@ ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 10080  # Token过期时间一周
 
 LOGIN_PASSWORD = os.getenv("LOGIN_PASSWORD", "")
-print(LOGIN_PASSWORD)
 
 # 是否需要登录
 REQUIRE_LOGIN = bool(LOGIN_PASSWORD.strip())
@@ -64,11 +63,18 @@ app = FastAPI(
 register_error_handlers(app)
 
 # 添加CORS中间件
+# 解析 CORS 允许的来源，使用逗号分隔的环境变量 CORS_ALLOW_ORIGINS；默认 *
+_cors_env = os.getenv("CORS_ALLOW_ORIGINS", "*")
+if _cors_env.strip() == "*":
+    _allow_origins = ["*"]
+else:
+    _allow_origins = [o.strip() for o in _cors_env.split(",") if o.strip()]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # 开发环境允许所有来源，生产环境应该限制
+    allow_origins=_allow_origins,  # 开发环境允许所有来源，生产环境建议配置白名单
     allow_credentials=True,
-    allow_methods=["*"],    
+    allow_methods=["*"],
     allow_headers=["*"],
 )
 
@@ -478,7 +484,8 @@ async def analyze(request: AnalyzeRequest, username: str = Depends(verify_token)
                 logger.info(f"批量流式分析完成，共发送 {chunk_count} 个块")
         
         logger.info("成功创建流式响应生成器")
-        return StreamingResponse(generate_stream(), media_type='application/json')
+        # 使用 NDJSON 作为流式返回的媒体类型，便于前端按行解析
+        return StreamingResponse(generate_stream(), media_type='application/x-ndjson; charset=utf-8')
             
     except AppValidationError:
         raise

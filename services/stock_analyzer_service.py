@@ -330,7 +330,7 @@ class StockAnalyzerService:
                         "change_percent": change_percent,  # 涨跌幅百分比，新字段
                         "rsi": float(latest_data.get('RSI', 0)) if 'RSI' in latest_data else None,
                         "ma_trend": "UP" if latest_data.get('MA5', 0) > latest_data.get('MA20', 0) else "DOWN",
-                        "macd_signal": "BUY" if latest_data.get('MACD', 0) > latest_data.get('MACD_Signal', 0) else "SELL",
+                        "macd_signal": "BUY" if latest_data.get('MACD', 0) > latest_data.get('Signal', 0) else "SELL",
                         "volume_status": "HIGH" if latest_data.get('Volume_Ratio', 1) > 1.5 else ("LOW" if latest_data.get('Volume_Ratio', 1) < 0.5 else "NORMAL"),
                         "status": "completed" if score < min_score else "waiting",
                         "risk_adjusted_score": float(ra_val),

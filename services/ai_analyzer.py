@@ -183,7 +183,7 @@ class AIAnalyzer:
 
             # 确定MACD信号
             macd = latest_data.get('MACD', 0)
-            macd_signal = latest_data.get('MACD_Signal', 0)
+            macd_signal = latest_data.get('Signal', 0)
             macd_signal_type = 'BUY' if macd > macd_signal else 'SELL'
 
             # 确定成交量状态
